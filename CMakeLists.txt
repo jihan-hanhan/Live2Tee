@@ -71,3 +71,43 @@ add_custom_command(TARGET Live2Tee POST_BUILD
     $<TARGET_FILE_DIR:Live2Tee>/assets
   COMMENT "Copy assets next to executable"
 )
+
+# ---- 一键发布包:dist/ = exe + assets + windeployqt 收集的 Qt6/MinGW 运行库 -> zip ----
+if(WIN32)
+  get_target_property(_qmake_exe Qt6::qmake IMPORTED_LOCATION)
+  get_filename_component(_qt_bin_dir "${_qmake_exe}" DIRECTORY)
+  find_program(WINDEPLOYQT_EXE windeployqt HINTS "${_qt_bin_dir}")
+
+  if(WINDEPLOYQT_EXE)
+    set(_DIST_DIR "${CMAKE_BINARY_DIR}/dist")
+    # MinGW 运行库(windeployqt 在 MSYS2 环境下可能不复制,显式补齐)
+    get_filename_component(_mingw_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(_rt_cmds "")
+    foreach(_rt libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
+      if(EXISTS "${_mingw_bin}/${_rt}")
+        list(APPEND _rt_cmds
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_mingw_bin}/${_rt}" "${_DIST_DIR}/")
+      endif()
+    endforeach()
+    add_custom_target(release
+      COMMAND ${CMAKE_COMMAND} -E remove_directory "${_DIST_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_DIST_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:Live2Tee>" "${_DIST_DIR}/"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${_DIST_DIR}/assets"
+      # 自动收集 Qt6 DLL、平台插件、WebSocket 插件及 MinGW 运行库
+      # (libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll)
+      COMMAND "${WINDEPLOYQT_EXE}" --no-translations "${_DIST_DIR}/Live2Tee.exe"
+      ${_rt_cmds}
+      COMMAND powershell -NoProfile -Command
+        "Compress-Archive -Path '${_DIST_DIR}/*' -DestinationPath '${CMAKE_BINARY_DIR}/Live2Tee-win64.zip' -Force"
+      DEPENDS Live2Tee
+      COMMENT "Assemble release zip at ${CMAKE_BINARY_DIR}/Live2Tee-win64.zip"
+      VERBATIM
+    )
+  else()
+    message(WARNING "windeployqt 未找到,无法生成 release 打包目标")
+  endif()
+endif()

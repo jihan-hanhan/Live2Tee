@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QColor>
+#include <QDir>
 #include <QMenu>
 #include <QPainter>
 #include <QPen>
@@ -69,6 +70,11 @@ int main(int argc, char* argv[])
 
 	// ---- 配置 ----
 	const live2tee::AppConfig cfg = live2tee::AppConfig::Load();
+
+	// assets/skins、assets/browser 不存在则自动创建(首次运行/换目录部署时),
+	// skins 供用户自行放入皮肤 png;browser、emoticons.png、game.png 由发布包提供。
+	QDir().mkpath(cfg.ResolvedAssetsDir() + QStringLiteral("/skins"));
+	QDir().mkpath(cfg.ResolvedAssetsDir() + QStringLiteral("/browser"));
 
 	// ---- 全局输入 ----
 	live2tee::InputQueue queue;
