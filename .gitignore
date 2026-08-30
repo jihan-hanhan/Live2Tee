@@ -1,0 +1,29 @@
+# 资产目录(DDNet 素材/皮肤,不入库;运行时由 CMake 复制到可执行文件同级)
+assets/
+
+# 构建目录与 CMake 产物
+build/
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+DartConfiguration.tcl
+
+# 编译产物
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+
+# 运行时生成的配置(含本机路径)
+config.json
+*.log
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
