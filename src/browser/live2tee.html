@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>Live2Tee Browser Source</title>
+<!--
+  Live2Tee OBS 浏览器源页面。
+  用法:OBS 添加"浏览器源",URL 填
+      file:///<assets目录>/browser/live2tee.html?port=8787
+  必须勾选"自定义 CSS 中关闭透明背景"之外的透明度选项——本页背景透明,
+  帧带直通 alpha,无需色键。
+  帧二进制格式:4 字节魔数 'L2T1' + uint32 LE 宽 + uint32 LE 高 + RGBA8888 像素。
+-->
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;   /* OBS 浏览器源:透明背景,真 alpha 直出 */
+    overflow: hidden;
+  }
+  #stage {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+  }
+  /* 连接失败时的提示(默认隐藏) */
+  #status {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    font: 12px/1.4 "Segoe UI", sans-serif;
+    color: #ff6b6b;
+    background: rgba(0,0,0,0.55);
+    padding: 4px 8px;
+    border-radius: 3px;
+    display: none;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="status"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- 解析 port ----
+  function getPort() {
+    var m = /[?&]port=(\d+)/.exec(window.location.search);
+    return m ? parseInt(m[1], 10) : 8787;
+  }
+
+  var port = getPort();
+  var canvas = document.getElementById("stage");
+  var ctx = canvas.getContext("2d", { alpha: true });
+  var statusEl = document.getElementById("status");
+  var imageData = null;   // 缓存的 ImageData(尺寸变化时重建)
+  var ws = null;
+  var reconnectTimer = null;
+  var RECONNECT_MS = 1000;
+
+  function showStatus(msg) {
+    statusEl.textContent = msg;
+    statusEl.style.display = "block";
+  }
+  function hideStatus() { statusEl.style.display = "none"; }
+
+  // ---- WebSocket 接收帧 ----
+  function connect() {
+    if (ws) return;
+    var url = "ws://127.0.0.1:" + port;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      showStatus("Live2Tee: 无法创建 WebSocket " + url);
+      scheduleReconnect();
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = function () { hideStatus(); };
+
+    ws.onmessage = function (ev) {
+      var buf = ev.data;
+      if (!(buf instanceof ArrayBuffer) || buf.byteLength < 12) return;
+      var dv = new DataView(buf);
+      // 魔数 'L','2','T','1'
+      if (dv.getUint8(0) !== 0x4C || dv.getUint8(1) !== 0x32 ||
+          dv.getUint8(2) !== 0x54 || dv.getUint8(3) !== 0x31) return;
+      var w = dv.getUint32(4, true);   // little-endian
+      var h = dv.getUint32(8, true);
+      if (w <= 0 || h <= 0) return;
+      var pixelBytes = w * h * 4;
+      if (buf.byteLength < 12 + pixelBytes) return;
+
+      // 画布尺寸与输出分辨率一致;CSS 再由 OBS 缩放。
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        imageData = null;
+      }
+      if (!imageData) imageData = ctx.createImageData(w, h);
+
+      // RGBA8888 直接拷入 ImageData.data(Uint8ClampedArray)
+      var src = new Uint8Array(buf, 12, pixelBytes);
+      imageData.data.set(src);
+      ctx.putImageData(imageData, 0, 0);
+    };
+
+    ws.onerror = function () { /* onclose 会处理重连 */ };
+
+    ws.onclose = function () {
+      ws = null;
+      showStatus("Live2Tee: 未连接到 ws://127.0.0.1:" + port +
+                 " (请确认程序已启动且浏览器源输出开启)");
+      scheduleReconnect();
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      connect();
+    }, RECONNECT_MS);
+  }
+
+  // 页面不可见时不必重连风暴(OBS 切场景时)
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && !ws) connect();
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

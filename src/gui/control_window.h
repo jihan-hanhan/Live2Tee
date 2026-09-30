@@ -2,12 +2,14 @@
 
 // 配置 GUI(独立窗口):
 //   - assets / skins 目录(可自定义,带浏览按钮)
-//   - 皮肤列表(自动扫描 skins 目录,下拉切换)
+//   - 皮肤列表(自动扫描 skins 目录,下拉切换 / "选择..."子窗口按 Tee 预览图挑选)
 //   - 浏览器源输出:开关 / 端口 / 分辨率 / 帧率 / URL 复制
 //   - 预览窗口开关、渲染缩放、背景(仅预览)
 // 应用 = 保存 config.json + 热更新各组件;关闭 = 仅隐藏,可再次唤起。
 
 #include <QWidget>
+
+#include <QPoint>
 
 #include "../config.h"
 
@@ -16,6 +18,9 @@ class QComboBox;
 class QSpinBox;
 class QDoubleSpinBox;
 class QCheckBox;
+class QLabel;
+class QPushButton;
+class QTimer;
 
 namespace live2tee {
 
@@ -31,6 +36,9 @@ signals:
 	// 用户点了"修正鼠标位置":重置虚拟鼠标偏移(朝向校准)
 	void ResetVMouseRequested();
 
+	// 用户在"设置朝向原点"流程里选定了原点屏幕坐标
+	void SetOriginRequested(const QPoint& origin);
+
 protected:
 	void closeEvent(QCloseEvent* e) override; // 隐藏而非退出
 
@@ -40,6 +48,11 @@ private:
 	void UpdatePageUrl();             // 按端口/资源目录刷新浏览器源 URL
 	void OnApply();
 	QString PageUrlFor(int port) const;
+
+	// 设置朝向原点流程:点击按钮后进入等待,轮询全局左键按下沿。
+	void BeginSetOrigin();
+	void PollOriginClick();
+	void CancelSetOrigin();
 
 	AppConfig cfg_;
 	QLineEdit* assets_edit_;
@@ -53,6 +66,12 @@ private:
 	QComboBox* fps_combo_;         // 输出帧率
 	QLineEdit* url_edit_;          // OBS 浏览器源 URL(只读)
 	QCheckBox* preview_check_;     // 预览窗口开关
+
+	QPushButton* origin_btn_ = nullptr; // 设置朝向原点按钮
+	QLabel* origin_hint_ = nullptr;     // 等待时的提示文案
+	QTimer* origin_timer_ = nullptr;    // 轮询全局左键
+	bool origin_awaiting_ = false;      // 是否在等待用户点击确认
+	bool origin_prev_down_ = false;     // 上一轮左键状态(用于沿检测)
 };
 
 } // namespace live2tee

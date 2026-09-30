@@ -8,6 +8,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -18,11 +19,19 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
+#include <QWidget>
 
 #include <cstdio>
+
+#if defined(_WIN32)
+	#include <windows.h> // GetAsyncKeyState:检测全局左键按下沿
+#endif
+
+#include "skin_picker_dialog.h"
 
 namespace live2tee {
 
@@ -58,14 +67,49 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 		}
 	});
 
+	auto* assets_row = new QWidget(this);
+	auto* assets_row_lay = new QHBoxLayout(assets_row);
+	assets_row_lay->setContentsMargins(0, 0, 0, 0);
+	assets_row_lay->addWidget(assets_edit_, 1);
+	assets_row_lay->addWidget(assets_browse);
+
+	auto* skins_row = new QWidget(this);
+	auto* skins_row_lay = new QHBoxLayout(skins_row);
+	skins_row_lay->setContentsMargins(0, 0, 0, 0);
+	skins_row_lay->addWidget(skins_edit_, 1);
+	skins_row_lay->addWidget(skins_browse);
+
 	auto* dir_form = new QFormLayout;
-	dir_form->addRow(tr("assets 目录:"), assets_edit_);
-	dir_form->addRow(QString(), assets_browse);
-	dir_form->addRow(tr("skins 目录:"), skins_edit_);
-	dir_form->addRow(QString(), skins_browse);
+	dir_form->addRow(tr("assets 目录:"), assets_row);
+	dir_form->addRow(tr("skins 目录:"), skins_row);
 
 	// ---- 皮肤 / 缩放 / 背景 ----
 	skin_combo_ = new QComboBox(this);
+	auto* skin_pick_btn = new QPushButton(tr("选择..."), this);
+	skin_pick_btn->setToolTip(tr("打开皮肤选择窗口,按 Tee 渲染预览图挑选"));
+	connect(skin_pick_btn, &QPushButton::clicked, this, [this] {
+		// 以编辑框中的当前目录为准(用户可能刚"浏览..."了新目录,尚未点应用)
+		AppConfig tmp = cfg_;
+		tmp.assets_dir = assets_edit_->text().trimmed();
+		tmp.skins_dir = skins_edit_->text().trimmed();
+		tmp.skin = skin_combo_->currentText();
+		SkinPickerDialog dlg(tmp, this);
+		if (dlg.exec() == QDialog::Accepted) {
+			const QString name = dlg.SelectedSkin();
+			int idx = skin_combo_->findText(name);
+			if (idx < 0) {
+				skin_combo_->addItem(name);
+				idx = skin_combo_->count() - 1;
+			}
+			skin_combo_->setCurrentIndex(idx); // 仅回选,保存/生效仍走"应用"
+		}
+	});
+
+	auto* skin_row = new QWidget(this);
+	auto* skin_row_lay = new QHBoxLayout(skin_row);
+	skin_row_lay->setContentsMargins(0, 0, 0, 0);
+	skin_row_lay->addWidget(skin_pick_btn);
+	skin_row_lay->addWidget(skin_combo_, 1);
 
 	scale_spin_ = new QDoubleSpinBox(this);
 	scale_spin_->setRange(0.25, 4.0);
@@ -78,7 +122,7 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 	bg_combo_->addItem(tr("绿幕"));
 
 	auto* misc_form = new QFormLayout;
-	misc_form->addRow(tr("皮肤:"), skin_combo_);
+	misc_form->addRow(tr("皮肤:"), skin_row);
 	misc_form->addRow(tr("渲染缩放:"), scale_spin_);
 	misc_form->addRow(tr("背景(仅预览):"), bg_combo_);
 
@@ -124,11 +168,28 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 	connect(reset_mouse_btn, &QPushButton::clicked,
 			this, &ControlWindow::ResetVMouseRequested);
 
+	// ---- 设置朝向原点:用户移动光标到目标位置后按左键确认 ----
+	origin_btn_ = new QPushButton(tr("设置朝向原点..."), this);
+	origin_btn_->setToolTip(
+		tr("点击后把光标移到 Tee 应当朝向参考的原点位置,再按一次鼠标左键确认。\n"
+		   "确认后 Tee 朝向 = 光标相对该原点的方位(而非屏幕中心)。"));
+	connect(origin_btn_, &QPushButton::clicked, this, &ControlWindow::BeginSetOrigin);
+
+	origin_hint_ = new QLabel(this);
+	origin_hint_->setStyleSheet(QStringLiteral("color:#2a7;"));
+	origin_hint_->hide();
+
+	origin_timer_ = new QTimer(this);
+	origin_timer_->setInterval(20);
+	connect(origin_timer_, &QTimer::timeout, this, &ControlWindow::PollOriginClick);
+
 	root->addLayout(dir_form);
 	root->addLayout(misc_form);
 	root->addWidget(output_group);
 	root->addWidget(preview_check_);
 	root->addWidget(reset_mouse_btn);
+	root->addWidget(origin_btn_);
+	root->addWidget(origin_hint_);
 
 	// 端口变化时 URL 实时跟随
 	connect(port_spin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) {
@@ -225,9 +286,58 @@ void ControlWindow::OnApply()
 	emit ConfigApplied(new_cfg);
 }
 
+void ControlWindow::BeginSetOrigin()
+{
+	origin_awaiting_ = true;
+	origin_prev_down_ = false; // 上一轮先记为未按下,等待下一次按下沿
+	origin_btn_->setText(tr("等待点击确认...(关闭窗口可取消)"));
+	origin_btn_->setEnabled(false);
+	origin_hint_->setText(tr("请将光标移到目标原点位置,然后按下鼠标左键确认。"));
+	origin_hint_->show();
+	origin_timer_->start();
+}
+
+void ControlWindow::PollOriginClick()
+{
+#if defined(_WIN32)
+	// GetAsyncKeyState 的最高位表示"当前是否按下";检测 0→1 沿,
+	// 这样不会把用户按"设置朝向原点"按钮那次点击误当成确认。
+	const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+	if (down && !origin_prev_down_) {
+		const QPoint origin = QCursor::pos(); // Qt 逻辑像素,与 SetMouseOrigin 一致
+		origin_prev_down_ = down;
+		CancelSetOrigin();
+		emit SetOriginRequested(origin);
+		return;
+	}
+	origin_prev_down_ = down;
+#else
+	// 非 Windows 暂无全局输入后端:直接把当前光标位置作为原点,
+	// 避免按钮无响应(实际朝向功能本身在这些平台也不可用)。
+	(void)0;
+	const QPoint origin = QCursor::pos();
+	CancelSetOrigin();
+	emit SetOriginRequested(origin);
+#endif
+}
+
+void ControlWindow::CancelSetOrigin()
+{
+	origin_timer_->stop();
+	origin_awaiting_ = false;
+	origin_prev_down_ = false;
+	if (origin_btn_) {
+		origin_btn_->setText(tr("设置朝向原点..."));
+		origin_btn_->setEnabled(true);
+	}
+	if (origin_hint_)
+		origin_hint_->hide();
+}
+
 void ControlWindow::closeEvent(QCloseEvent* e)
 {
 	// 关闭 = 隐藏,之后还能通过热键/托盘/预览双右键唤起
+	CancelSetOrigin();
 	hide();
 	e->ignore();
 }

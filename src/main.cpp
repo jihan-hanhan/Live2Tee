@@ -134,6 +134,13 @@ int main(int argc, char* argv[])
 			output.Scene()->CalibrateMouseOffset();
 	});
 
+	// GUI"设置朝向原点":用户选定屏幕点 origin,Tee 朝向 = 光标相对 origin 的方位
+	QObject::connect(&gui, &live2tee::ControlWindow::SetOriginRequested,
+					 [&](const QPoint& origin) {
+		if (output.Scene())
+			output.Scene()->SetMouseOrigin(origin);
+	});
+
 	// 全局热键轮询(键盘钩子线程置位标志,主线程消费)
 	QTimer hotkey_poll;
 	hotkey_poll.setInterval(100);

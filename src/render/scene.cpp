@@ -3,6 +3,7 @@
 
 #include "scene.h"
 
+#include <QCursor>
 #include <QFileInfo>
 #include <QOpenGLFunctions_2_1>
 #include <QOpenGLVersionFunctionsFactory>
@@ -270,6 +271,16 @@ void TeeScene::CalibrateMouseOffset()
 	}
 }
 
+void TeeScene::SetMouseOrigin(const QPoint& origin)
+{
+	// 全程使用 Qt 逻辑像素:QCursor::pos() 与传入的 origin 同属 Qt
+	// 屏幕逻辑坐标,高 DPI 缩放一致,无需手动换算物理像素。
+	// 把虚拟偏移锚定为"光标 - 原点",使 Tee 朝向 = 光标相对 origin 的方位。
+	const QPoint cursor = QCursor::pos();
+	state_.mouse_off_x = static_cast<float>(cursor.x() - origin.x());
+	state_.mouse_off_y = static_cast<float>(cursor.y() - origin.y());
+}
+
 void TeeScene::ReloadTextures()
 {
 	// 需在 makeCurrent 后调用(Init / ApplyConfig 已保证)
@@ -306,6 +317,7 @@ void TeeScene::ReloadTextures()
 
 void TeeScene::ApplyConfig(const AppConfig& cfg)
 {
+	// 必须在覆盖 cfg_ 之前比较旧配置,否则换肤不会触发纹理重载
 	const bool reload = (cfg.ResolvedAssetsDir() != cfg_.ResolvedAssetsDir()) ||
 						(cfg.ResolvedSkinsDir() != cfg_.ResolvedSkinsDir()) ||
 						(cfg.skin != cfg_.skin);
@@ -314,6 +326,24 @@ void TeeScene::ApplyConfig(const AppConfig& cfg)
 	BuildSkinInfo(info_, tex_skin_.gl_id, TeeSize());
 	if (reload)
 		ReloadTextures(); // 需调用方已 makeCurrent
+}
+
+bool TeeScene::ReloadSkinTexture(const QString& skin_path)
+{
+	// 仅替换皮肤(供皮肤选择窗口逐个生成缩略图),
+	// game.png / emoticons.png 保持不变,避免每个皮肤重复解码上传。
+	if (!f_)
+		return false;
+	Texture next;
+	if (!LoadPng(skin_path.toStdString(), next, f_, true)) {
+		std::fprintf(stderr, "skin load failed: %s\n", skin_path.toUtf8().constData());
+		return false;
+	}
+	DeleteTexture(tex_skin_, f_);
+	tex_skin_ = next;
+	BuildSkinInfo(info_, tex_skin_.gl_id, TeeSize());
+	textures_ready_ = tex_skin_.Valid() && tex_emo_.Valid() && tex_weapon_.Valid();
+	return true;
 }
 
 void TeeScene::PumpInput()

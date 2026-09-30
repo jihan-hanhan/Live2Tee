@@ -30,6 +30,7 @@ add_executable(Live2Tee
   src/config.cpp
   src/gui/preview_window.cpp
   src/gui/control_window.cpp
+  src/gui/skin_picker_dialog.cpp
   src/render/scene.cpp
   src/render/offscreen_output.cpp
   src/render/gl_backend.cpp
@@ -65,21 +66,52 @@ if(WIN32)
 endif()
 
 # ---- 把 assets 复制到可执行文件同级目录(默认资源布局) -------------------------
+# 仓库不内置素材,assets/ 不存在时跳过(添加素材后重新 configure 即可生效)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+  add_custom_command(TARGET Live2Tee POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_CURRENT_SOURCE_DIR}/assets
+      $<TARGET_FILE_DIR:Live2Tee>/assets
+    COMMENT "Copy assets next to executable"
+  )
+endif()
+
+# 浏览器源页面:src/browser/live2tee.html -> assets/browser/live2tee.html
+# (程序运行时只 mkpath assets/browser,页面本身需随包部署)
 add_custom_command(TARGET Live2Tee POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets
-    $<TARGET_FILE_DIR:Live2Tee>/assets
-  COMMENT "Copy assets next to executable"
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    $<TARGET_FILE_DIR:Live2Tee>/assets/browser
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/browser/live2tee.html
+    $<TARGET_FILE_DIR:Live2Tee>/assets/browser/live2tee.html
+  COMMENT "Deploy browser source page"
 )
 
 # ---- 一键发布包:dist/ = exe + assets + windeployqt 收集的 Qt6/MinGW 运行库 -> zip ----
 if(WIN32)
   get_target_property(_qmake_exe Qt6::qmake IMPORTED_LOCATION)
   get_filename_component(_qt_bin_dir "${_qmake_exe}" DIRECTORY)
-  find_program(WINDEPLOYQT_EXE windeployqt HINTS "${_qt_bin_dir}")
+  # Qt6 部署工具在新版 MSYS2 中名为 windeployqt6 / windeployqt-qt6,
+  # 旧版及其他发行版可能仍叫 windeployqt,依次尝试
+  find_program(WINDEPLOYQT_EXE
+    NAMES windeployqt6 windeployqt-qt6 windeployqt
+    HINTS "${_qt_bin_dir}")
 
   if(WINDEPLOYQT_EXE)
     set(_DIST_DIR "${CMAKE_BINARY_DIR}/dist")
+    # assets 为可选素材目录(仓库不内置),存在时才打入发布包
+    set(_assets_cmds "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+      list(APPEND _assets_cmds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${_DIST_DIR}/assets")
+    endif()
+    # 浏览器源页面(源码内资产,不在 assets/ 下)
+    list(APPEND _assets_cmds
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_DIST_DIR}/assets/browser"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/browser/live2tee.html"
+        "${_DIST_DIR}/assets/browser/live2tee.html")
     # MinGW 运行库(windeployqt 在 MSYS2 环境下可能不复制,显式补齐)
     get_filename_component(_mingw_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(_rt_cmds "")
@@ -95,8 +127,7 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E make_directory "${_DIST_DIR}"
       COMMAND ${CMAKE_COMMAND} -E copy
         "$<TARGET_FILE:Live2Tee>" "${_DIST_DIR}/"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${_DIST_DIR}/assets"
+      ${_assets_cmds}
       # 自动收集 Qt6 DLL、平台插件、WebSocket 插件及 MinGW 运行库
       # (libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll)
       COMMAND "${WINDEPLOYQT_EXE}" --no-translations "${_DIST_DIR}/Live2Tee.exe"

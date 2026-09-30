@@ -8,6 +8,8 @@
 #include <chrono>
 #include <memory>
 
+#include <QPoint>
+
 #include "../config.h"
 #include "../input/input.h"
 #include "../state/state.h"
@@ -33,6 +35,10 @@ public:
 	// 配置变更(皮肤/目录/缩放)。纹理重载需要 makeCurrent,由调用方保证。
 	void ApplyConfig(const AppConfig& cfg);
 
+	// 预览/缩略图场景:仅替换皮肤纹理,不重新加载 game.png/emoticons.png。
+	// 需在 makeCurrent 后调用;成功返回 true。
+	bool ReloadSkinTexture(const QString& skin_path);
+
 	// 渲染一帧到当前绑定的帧缓冲(像素坐标,左上原点,y 向下)。
 	// 始终清为透明黑;预览窗口的绿幕底色由窗口侧自己填。
 	void Render(int w, int h);
@@ -46,6 +52,10 @@ public:
 	// (Tee 朝向 = 光标相对屏幕中心的方位),消除积分累积漂移。
 	// 平台查询失败时退化为清零(默认朝右)。
 	void CalibrateMouseOffset();
+
+	// 把朝向原点设为指定屏幕点 origin(Tee 朝向 = 光标相对 origin 的方位)。
+	// 坐标用 Qt 逻辑像素(QCursor::pos),与高 DPI 缩放一致,跨 Windows/X11/macOS。
+	void SetMouseOrigin(const QPoint& origin);
 
 private:
 	float TeeSize() const; // 基础尺寸 × 用户缩放(render_scale)

@@ -27,3 +27,5 @@ config.json
 .vscode/
 .idea/
 *.user
+.cache/
+.trae/
