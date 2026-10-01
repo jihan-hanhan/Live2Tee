@@ -262,6 +262,7 @@ bool TeeScene::Init(QOpenGLFunctions_2_1* f)
 
 void TeeScene::CalibrateMouseOffset()
 {
+	has_custom_origin_ = false; // 回到屏幕中心模式
 	int off_x = 0, off_y = 0;
 	if (QueryMouseOffsetFromScreenCenter(off_x, off_y)) {
 		state_.mouse_off_x = static_cast<float>(off_x);
@@ -279,6 +280,31 @@ void TeeScene::SetMouseOrigin(const QPoint& origin)
 	const QPoint cursor = QCursor::pos();
 	state_.mouse_off_x = static_cast<float>(cursor.x() - origin.x());
 	state_.mouse_off_y = static_cast<float>(cursor.y() - origin.y());
+	// 记住原点,供周期重锚定(ReAnchorMouse)沿用同一参考系
+	has_custom_origin_ = true;
+	custom_origin_ = origin;
+}
+
+void TeeScene::ReAnchorMouse()
+{
+	const QPoint cursor = QCursor::pos();
+	// XWayland 下光标位于原生 Wayland 窗口时,光标查询结果冻结在最后离开
+	// X11 窗口的位置。位置不变 = 光标静止(无漂移)或查询冻结(不可信),
+	// 两种情形都跳过锚定,避免把积分误差"校正"到过期位置。
+	if (cursor == last_reanchor_cursor_)
+		return;
+	last_reanchor_cursor_ = cursor;
+
+	if (has_custom_origin_) {
+		state_.mouse_off_x = static_cast<float>(cursor.x() - custom_origin_.x());
+		state_.mouse_off_y = static_cast<float>(cursor.y() - custom_origin_.y());
+	} else {
+		int off_x = 0, off_y = 0;
+		if (QueryMouseOffsetFromScreenCenter(off_x, off_y)) {
+			state_.mouse_off_x = static_cast<float>(off_x);
+			state_.mouse_off_y = static_cast<float>(off_y);
+		}
+	}
 }
 
 void TeeScene::ReloadTextures()
@@ -353,6 +379,16 @@ void TeeScene::PumpInput()
 	while (queue_->Pop(ev))
 		state_.Apply(ev, now);
 	state_.Tick(now);
+
+	// libinput 指针加速使原始位移积分系统性偏离真实光标(大幅快速移动时
+	// 光标走得比原始积分远),周期性用真实光标位置重锚定压制漂移。
+	// ReAnchorMouse 内部有新鲜度检测,光标查询冻结时自动跳过。
+	// 是否启用及间隔由配置控制(Linux 默认开启 200ms,Windows 默认关闭)。
+	if (cfg_.auto_reanchor &&
+		now - last_reanchor_time_ >= cfg_.reanchor_interval_ms / 1000.0f) {
+		last_reanchor_time_ = now;
+		ReAnchorMouse();
+	}
 
 	// 偏移控制:鼠标运动增量直接累加,长时间运行数值会增长,
 	// 超界时拉回即可(方向只取决于偏移的相对比例,不影响朝向);

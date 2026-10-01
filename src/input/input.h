@@ -28,6 +28,10 @@ namespace live2tee {
 // 平台拿不到全局光标位置(如 Wayland 沙盒)时返回 false。
 bool QueryMouseOffsetFromScreenCenter(int& off_x, int& off_y);
 
+// 查询全局鼠标左键当前是否按下(供 GUI 偶发轮询,如"设置朝向原点"的确认点击)。
+// 返回 false 表示未按下或平台不支持。
+bool QueryGlobalLeftButtonDown();
+
 enum class EInputKind {
 	MouseMove,
 	MouseLeft,

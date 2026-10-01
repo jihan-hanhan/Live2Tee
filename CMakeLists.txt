@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Live2Tee LANGUAGES CXX)
+project(Live2Tee LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,6 +63,35 @@ set_target_properties(Live2Tee PROPERTIES
 if(WIN32)
   # 低级钩子需要 user32
   target_link_libraries(Live2Tee PRIVATE user32)
+endif()
+
+# ---- Linux:全局输入后端 ------------------------------------------------------
+# evdev(默认启用):直接读 /dev/input/event*,内核输入层全局捕获,
+#   X11/Wayland 会话都有效;只需内核头文件,无额外库依赖。
+#   运行时需要设备读权限(通常 sudo usermod -aG input $USER 后重新登录)。
+# XI2(可选回退):找到 libx11/libxi 时启用,纯 X11 会话免配置全局可用;
+#   XWayland 下仅在光标位于 X11 窗口内时收到输入。
+# 两者都没有时退化为空桩(照常编译,仅无全局输入),不阻断构建。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(Live2Tee PRIVATE LIVE2TEE_INPUT_EVDEV=1)
+  # evdev 设备打开/分类与帮手发送逻辑(libc-only,主程序与帮手共用)
+  target_sources(Live2Tee PRIVATE src/input/evdev_helper.c)
+  # pkexec 特权帮手:独立微型二进制,不链接 Qt,可被复制到 /tmp 后以 root
+  # 执行(AppImage 的 FUSE 挂载 root 无权访问,且 Qt 二进制无法脱离包内
+  # 库单独运行)。主程序经 SCM_RIGHTS 接收它打开的输入设备 fd。
+  add_executable(live2tee-evdev-helper src/input/evdev_helper.c)
+  target_compile_definitions(live2tee-evdev-helper PRIVATE L2T_HELPER_MAIN=1)
+  find_package(X11)
+  if(X11_FOUND AND X11_Xi_FOUND)
+    target_compile_definitions(Live2Tee PRIVATE LIVE2TEE_INPUT_X11=1)
+    target_include_directories(Live2Tee PRIVATE ${X11_INCLUDE_DIR})
+    # Xkb* 函数在现代发行版内置于 libX11,无需额外链接
+    target_link_libraries(Live2Tee PRIVATE ${X11_X11_LIB} ${X11_Xi_LIB})
+    message(STATUS "Live2Tee: input backends = evdev + XI2 fallback")
+  else()
+    message(STATUS "Live2Tee: input backends = evdev only "
+                   "(libx11-dev/libXi-dev not found, XI2 fallback disabled)")
+  endif()
 endif()
 
 # ---- 把 assets 复制到可执行文件同级目录(默认资源布局) -------------------------

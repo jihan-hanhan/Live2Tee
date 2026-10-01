@@ -57,6 +57,12 @@ public:
 	// 坐标用 Qt 逻辑像素(QCursor::pos),与高 DPI 缩放一致,跨 Windows/X11/macOS。
 	void SetMouseOrigin(const QPoint& origin);
 
+	// 周期性重锚定(供 Linux 帧循环调用):用真实光标位置校正积分偏移。
+	// libinput 指针加速使原始位移积分系统性偏离真实光标(大幅移动尤甚),
+	// 200ms 一次的重锚定把漂移压制在不可察觉的范围内。
+	// 光标查询冻结(XWayland 下光标位于原生 Wayland 窗口)时自动跳过。
+	void ReAnchorMouse();
+
 private:
 	float TeeSize() const; // 基础尺寸 × 用户缩放(render_scale)
 	void ReloadTextures(); // 需已 makeCurrent
@@ -75,6 +81,13 @@ private:
 
 	std::chrono::steady_clock::time_point t0_;
 	bool textures_ready_ = false;
+
+	// 朝向原点模式:SetMouseOrigin 后生效,CalibrateMouseOffset 复位为屏幕中心
+	bool has_custom_origin_ = false;
+	QPoint custom_origin_;
+	// 重锚定状态:上次查询的光标位置(新鲜度检测)与上次锚定时刻
+	QPoint last_reanchor_cursor_;
+	float last_reanchor_time_ = -1.0f;
 };
 
 } // namespace live2tee

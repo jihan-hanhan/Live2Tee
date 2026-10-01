@@ -1,7 +1,7 @@
 #pragma once
 
-// 程序配置:与可执行文件同级的 config.json。
-// 空目录字段 = 使用默认值(exe 同级 assets、assets/skins)。
+// 程序配置:Linux 下遵循 XDG Base Directory,Windows 保持 exe 同级。
+// 空目录字段 = 使用默认值(XDG 数据目录或 exe 同级 assets)。
 
 #include <QString>
 #include <QStringList>
@@ -25,11 +25,22 @@ struct AppConfig {
 	float render_scale = 1.0f;   // 渲染整体缩放(Tee/武器/表情)
 	QString gui_hotkey = "F9";   // 唤起配置 GUI 的全局热键(F1-F12,空 = 禁用)
 
+#if defined(__linux__)
+	bool auto_reanchor = true;   // 自动同步朝向(重锚定),Linux 默认开启
+#else
+	bool auto_reanchor = false;  // Windows/macOS 默认关闭
+#endif
+	int reanchor_interval_ms = 200; // 自动同步间隔(50~2000 ms)
+
 	// ---- 路径解析 ----
-	QString ConfigPath() const; // config.json 的绝对路径
-	QString ResolvedAssetsDir() const;
+	QString ConfigPath() const;       // config.json 的绝对路径
+	QString ResolvedAssetsDir() const; // 用户可写 assets 目录
 	QString ResolvedSkinsDir() const;
-	QString SkinPath() const;   // 当前皮肤完整路径
+	QString SkinPath() const;         // 当前皮肤完整路径
+
+	// 随程序捆绑的只读 assets 目录(exe 同级或安装前缀 share/live2tee/assets)。
+	// 供首次运行时复制到用户可写目录,不可写时直接作为回退。
+	static QString BundledAssetsDir();
 
 	// 解析 gui_hotkey 为 Windows VK 码(F1-F12),无效/禁用返回 0。
 	int HotkeyVk() const;

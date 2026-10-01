@@ -5,8 +5,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStandardPaths>
 
 #include <algorithm>
 
@@ -22,13 +24,48 @@ QStringList ScanSkinFiles(const QString& skins_dir)
 
 QString AppConfig::ConfigPath() const
 {
+#if defined(__linux__)
+	// 便携模式:exe 同级 config.json 已存在则沿用(向后兼容,避免旧配置丢失)
+	const QString portable = QCoreApplication::applicationDirPath() + QStringLiteral("/config.json");
+	if (QFileInfo::exists(portable))
+		return portable;
+	// XDG: ~/.config/Live2Tee/config.json
+	const QString xdg = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+	if (!xdg.isEmpty())
+		return xdg + QStringLiteral("/config.json");
+#endif
+	// Windows / 便携模式回退
 	return QCoreApplication::applicationDirPath() + QStringLiteral("/config.json");
+}
+
+QString AppConfig::BundledAssetsDir()
+{
+	// 便携模式:exe 同级 assets/
+	const QString portable = QCoreApplication::applicationDirPath() + QStringLiteral("/assets");
+	if (QFileInfo::exists(portable + QStringLiteral("/game.png")))
+		return portable;
+	// 安装模式:<prefix>/share/live2tee/assets/
+	const QString installed = QDir(QCoreApplication::applicationDirPath() +
+		QStringLiteral("/../share/live2tee/assets")).absolutePath();
+	if (QFileInfo::exists(installed + QStringLiteral("/game.png")))
+		return installed;
+	return portable; // 回退(可能不存在,由调用方处理)
 }
 
 QString AppConfig::ResolvedAssetsDir() const
 {
 	if (!assets_dir.isEmpty())
 		return QDir(assets_dir).absolutePath();
+#if defined(__linux__)
+	// 便携模式:exe 同级 assets 存在则直接用(开发/解压即用)
+	const QString portable = QCoreApplication::applicationDirPath() + QStringLiteral("/assets");
+	if (QFileInfo::exists(portable + QStringLiteral("/game.png")))
+		return portable;
+	// XDG 数据目录:~/.local/share/Live2Tee/assets/(首次运行由 main 复制初始化)
+	const QString xdg = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+	if (!xdg.isEmpty())
+		return xdg + QStringLiteral("/assets");
+#endif
 	return QCoreApplication::applicationDirPath() + QStringLiteral("/assets");
 }
 
@@ -80,11 +117,14 @@ AppConfig AppConfig::Load()
 	cfg.render_scale = static_cast<float>(
 		obj.value(QStringLiteral("render_scale")).toDouble(cfg.render_scale));
 	cfg.gui_hotkey = obj.value(QStringLiteral("gui_hotkey")).toString(cfg.gui_hotkey);
+	cfg.auto_reanchor = obj.value(QStringLiteral("auto_reanchor")).toBool(cfg.auto_reanchor);
+	cfg.reanchor_interval_ms = obj.value(QStringLiteral("reanchor_interval_ms")).toInt(cfg.reanchor_interval_ms);
 
 	cfg.output_size = std::clamp(cfg.output_size, 128, 2048);
 	cfg.output_fps = std::clamp(cfg.output_fps, 1, 120);
 	cfg.browser_port = std::clamp(cfg.browser_port, 1024, 65535);
 	cfg.render_scale = std::clamp(cfg.render_scale, 0.2f, 5.0f);
+	cfg.reanchor_interval_ms = std::clamp(cfg.reanchor_interval_ms, 50, 2000);
 	return cfg;
 }
 
@@ -102,8 +142,13 @@ bool AppConfig::Save() const
 	obj.insert(QStringLiteral("green_screen"), green_screen);
 	obj.insert(QStringLiteral("render_scale"), static_cast<double>(render_scale));
 	obj.insert(QStringLiteral("gui_hotkey"), gui_hotkey);
+	obj.insert(QStringLiteral("auto_reanchor"), auto_reanchor);
+	obj.insert(QStringLiteral("reanchor_interval_ms"), reanchor_interval_ms);
 
-	QFile file(ConfigPath());
+	const QString path = ConfigPath();
+	// XDG 目录可能不存在,先创建
+	QDir().mkpath(QFileInfo(path).absolutePath());
+	QFile file(path);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
 		return false;
 	file.write(QJsonDocument(obj).toJson());

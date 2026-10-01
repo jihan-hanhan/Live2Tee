@@ -2,12 +2,13 @@
 
 #include "control_window.h"
 
+#include "../input/input.h" // QueryGlobalLeftButtonDown
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QCursor>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -168,6 +169,31 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 	connect(reset_mouse_btn, &QPushButton::clicked,
 			this, &ControlWindow::ResetVMouseRequested);
 
+	// ---- 自动同步朝向:周期性重锚定,压制 libinput 指针加速造成的漂移 ----
+	reanchor_check_ = new QCheckBox(tr("自动同步朝向"), this);
+	reanchor_check_->setToolTip(
+		tr("开启后周期性用真实光标位置校正 Tee 朝向,压制指针加速造成的漂移。\n"
+		   "光标位于原生 Wayland 窗口上时自动跳过(查询结果不可信)。"));
+
+	reanchor_interval_spin_ = new QSpinBox(this);
+	reanchor_interval_spin_->setRange(50, 2000);
+	reanchor_interval_spin_->setSingleStep(50);
+	reanchor_interval_spin_->setSuffix(tr(" ms"));
+	reanchor_interval_spin_->setToolTip(tr("自动同步的间隔时间,越小校正越及时、开销越大"));
+
+	// 开关与间隔输入框放在"修正鼠标位置"按钮右侧同一行
+	auto* reanchor_row = new QWidget(this);
+	auto* reanchor_row_lay = new QHBoxLayout(reanchor_row);
+	reanchor_row_lay->setContentsMargins(0, 0, 0, 0);
+	reanchor_row_lay->addWidget(reset_mouse_btn, 1);
+	reanchor_row_lay->addWidget(reanchor_check_);
+	reanchor_row_lay->addWidget(reanchor_interval_spin_);
+
+	// 间隔输入框仅在开关启用时可编辑
+	reanchor_interval_spin_->setEnabled(reanchor_check_->isChecked());
+	connect(reanchor_check_, &QCheckBox::toggled,
+			reanchor_interval_spin_, &QSpinBox::setEnabled);
+
 	// ---- 设置朝向原点:用户移动光标到目标位置后按左键确认 ----
 	origin_btn_ = new QPushButton(tr("设置朝向原点..."), this);
 	origin_btn_->setToolTip(
@@ -187,7 +213,7 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 	root->addLayout(misc_form);
 	root->addWidget(output_group);
 	root->addWidget(preview_check_);
-	root->addWidget(reset_mouse_btn);
+	root->addWidget(reanchor_row);
 	root->addWidget(origin_btn_);
 	root->addWidget(origin_hint_);
 
@@ -244,6 +270,9 @@ void ControlWindow::LoadFromConfig()
 	fps_combo_->setCurrentIndex(fps_idx >= 0 ? fps_idx : fps_combo_->findData(60));
 	UpdatePageUrl();
 	preview_check_->setChecked(cfg_.preview_window);
+	reanchor_check_->setChecked(cfg_.auto_reanchor);
+	reanchor_interval_spin_->setValue(cfg_.reanchor_interval_ms);
+	reanchor_interval_spin_->setEnabled(cfg_.auto_reanchor);
 }
 
 void ControlWindow::RefreshSkinList()
@@ -262,7 +291,7 @@ void ControlWindow::OnApply()
 	new_cfg.skins_dir = skins_edit_->text().trimmed();
 	// 与默认值相同就存空串,保持"空 = 默认"的语义
 	if (QDir(new_cfg.assets_dir).absolutePath() ==
-		QCoreApplication::applicationDirPath() + QStringLiteral("/assets"))
+		QDir(AppConfig().ResolvedAssetsDir()).absolutePath())
 		new_cfg.assets_dir.clear();
 	new_cfg.skin = skin_combo_->currentText();
 	new_cfg.render_scale = static_cast<float>(scale_spin_->value());
@@ -276,6 +305,8 @@ void ControlWindow::OnApply()
 		new_cfg.output_fps = fps_data.isValid() ? fps_data.toInt() : 60;
 	}
 	new_cfg.preview_window = preview_check_->isChecked();
+	new_cfg.auto_reanchor = reanchor_check_->isChecked();
+	new_cfg.reanchor_interval_ms = reanchor_interval_spin_->value();
 	new_cfg.gui_hotkey = cfg_.gui_hotkey; // 热键暂不在 GUI 暴露,保持原值
 
 	cfg_ = new_cfg;
@@ -299,10 +330,9 @@ void ControlWindow::BeginSetOrigin()
 
 void ControlWindow::PollOriginClick()
 {
-#if defined(_WIN32)
-	// GetAsyncKeyState 的最高位表示"当前是否按下";检测 0→1 沿,
+	// 检测全局鼠标左键 0→1 沿,
 	// 这样不会把用户按"设置朝向原点"按钮那次点击误当成确认。
-	const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+	const bool down = live2tee::QueryGlobalLeftButtonDown();
 	if (down && !origin_prev_down_) {
 		const QPoint origin = QCursor::pos(); // Qt 逻辑像素,与 SetMouseOrigin 一致
 		origin_prev_down_ = down;
@@ -311,14 +341,6 @@ void ControlWindow::PollOriginClick()
 		return;
 	}
 	origin_prev_down_ = down;
-#else
-	// 非 Windows 暂无全局输入后端:直接把当前光标位置作为原点,
-	// 避免按钮无响应(实际朝向功能本身在这些平台也不可用)。
-	(void)0;
-	const QPoint origin = QCursor::pos();
-	CancelSetOrigin();
-	emit SetOriginRequested(origin);
-#endif
 }
 
 void ControlWindow::CancelSetOrigin()

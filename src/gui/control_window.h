@@ -67,6 +67,9 @@ private:
 	QLineEdit* url_edit_;          // OBS 浏览器源 URL(只读)
 	QCheckBox* preview_check_;     // 预览窗口开关
 
+	QCheckBox* reanchor_check_;         // 自动同步朝向开关
+	QSpinBox* reanchor_interval_spin_;  // 自动同步间隔(ms)
+
 	QPushButton* origin_btn_ = nullptr; // 设置朝向原点按钮
 	QLabel* origin_hint_ = nullptr;     // 等待时的提示文案
 	QTimer* origin_timer_ = nullptr;    // 轮询全局左键

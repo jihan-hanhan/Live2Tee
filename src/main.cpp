@@ -10,6 +10,8 @@
 #include <QApplication>
 #include <QColor>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QMenu>
 #include <QPainter>
 #include <QPen>
@@ -52,8 +54,40 @@ QPixmap MakeTrayIcon()
 
 } // namespace
 
+// 递归复制目录(首次运行时把捆绑 assets 复制到用户可写的 XDG 数据目录)
+static bool CopyDirRecursive(const QString& src, const QString& dst)
+{
+	QDir src_dir(src);
+	if (!src_dir.exists())
+		return false;
+	QDir().mkpath(dst);
+	const QStringList entries = src_dir.entryList(
+		QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+	for (const QString& entry : entries) {
+		const QString src_path = src + QStringLiteral("/") + entry;
+		const QString dst_path = dst + QStringLiteral("/") + entry;
+		if (QFileInfo(src_path).isDir()) {
+			if (!CopyDirRecursive(src_path, dst_path))
+				return false;
+		} else {
+			if (!QFile::copy(src_path, dst_path))
+				return false;
+		}
+	}
+	return true;
+}
+
 int main(int argc, char* argv[])
 {
+#if defined(LIVE2TEE_INPUT_X11)
+	// X11 输入后端需要 X 服务器(Wayland 会话下经 XWayland)。若 Qt 走 Wayland
+	// 平台插件,离屏 GL 会经 EGL->Zink->lavapipe 路径初始化,Mesa 软渲染在
+	// 该路径上崩溃(SIGSEGV),且 Wayland 原生协议不允许全局输入捕获。
+	// 有 DISPLAY 且用户未显式指定平台时强制 xcb;用户显式设置则尊重用户。
+	if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && !qgetenv("DISPLAY").isEmpty())
+		qputenv("QT_QPA_PLATFORM", "xcb");
+#endif
+
 	// GL 2.1 兼容上下文(立即模式) + alpha 通道(离屏 FBO 需要)
 	QSurfaceFormat fmt;
 	fmt.setVersion(2, 1);
@@ -71,10 +105,21 @@ int main(int argc, char* argv[])
 	// ---- 配置 ----
 	const live2tee::AppConfig cfg = live2tee::AppConfig::Load();
 
-	// assets/skins、assets/browser 不存在则自动创建(首次运行/换目录部署时),
-	// skins 供用户自行放入皮肤 png;browser、emoticons.png、game.png 由发布包提供。
-	QDir().mkpath(cfg.ResolvedAssetsDir() + QStringLiteral("/skins"));
-	QDir().mkpath(cfg.ResolvedAssetsDir() + QStringLiteral("/browser"));
+	// assets 初始化:
+	//   1. 便携模式(exe 同级 assets 有效)则直接使用;
+	//   2. 否则若解析到 XDG 数据目录且缺少关键文件,从捆绑目录复制初始化;
+	//   3. 确保 skins/ 和 browser/ 子目录存在。
+	const QString assets_dir = cfg.ResolvedAssetsDir();
+	const QString bundled = live2tee::AppConfig::BundledAssetsDir();
+	if (assets_dir != bundled &&
+		!QFileInfo::exists(assets_dir + QStringLiteral("/game.png")) &&
+		QFileInfo::exists(bundled + QStringLiteral("/game.png"))) {
+		std::fprintf(stderr, "first run: copying assets %s -> %s\n",
+			bundled.toUtf8().constData(), assets_dir.toUtf8().constData());
+		CopyDirRecursive(bundled, assets_dir);
+	}
+	QDir().mkpath(assets_dir + QStringLiteral("/skins"));
+	QDir().mkpath(assets_dir + QStringLiteral("/browser"));
 
 	// ---- 全局输入 ----
 	live2tee::InputQueue queue;
