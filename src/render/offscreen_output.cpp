@@ -11,6 +11,7 @@
 
 #include <cstdio>
 
+#include "../state/lua_behavior.h"
 #include "scene.h"
 
 namespace live2tee {
@@ -96,12 +97,38 @@ bool OffscreenOutput::Initialize()
 	// 启动锚定:初始偏移 = 当前真实光标方位,Tee 一启动就朝向鼠标
 	scene_->CalibrateMouseOffset();
 
+	// 行为脚本:按 cfg_.behavior_scripts 加载(空列表/全部失败 = 内置默认)
+	ReloadBehaviorScripts();
+
 	fbo_ = new QOpenGLFramebufferObject(cfg_.output_size, cfg_.output_size);
 	context_->doneCurrent();
 
 	connect(&timer_, &QTimer::timeout, this, &OffscreenOutput::RenderFrame);
 	RestartTimer();
 	return ok;
+}
+
+void OffscreenOutput::ReloadBehaviorScripts()
+{
+	if (!scene_)
+		return;
+	QStringList paths;
+	paths.reserve(cfg_.behavior_scripts.size());
+	for (const QString& name : cfg_.behavior_scripts)
+		paths << cfg_.ResolvedScriptsDir() + QStringLiteral("/") + name;
+
+	std::string lua_err;
+	if (auto lua_behavior = LuaBehavior::Load(paths, &lua_err)) {
+		std::fprintf(stderr, "behavior: 已加载脚本 [%s]\n",
+					 cfg_.behavior_scripts.join(QStringLiteral(", ")).toUtf8().constData());
+		scene_->SetBehavior(std::move(lua_behavior));
+	} else {
+		// 空列表(用户清空)/全部缺失或失败:回退内置默认行为
+		scene_->SetBehavior(nullptr);
+	}
+	if (!lua_err.empty())
+		std::fprintf(stderr, "behavior: 部分脚本加载失败,已跳过:\n%s",
+					 lua_err.c_str());
 }
 
 void OffscreenOutput::RestartTimer()
@@ -126,6 +153,9 @@ void OffscreenOutput::ApplyConfig(const AppConfig& cfg)
 		fbo_ = new QOpenGLFramebufferObject(cfg_.output_size, cfg_.output_size);
 	}
 	context_->doneCurrent();
+
+	// 脚本列表/内容可能已变化,每次应用都重建行为映射器
+	ReloadBehaviorScripts();
 
 	if (cfg_.output_fps != old_fps)
 		RestartTimer();

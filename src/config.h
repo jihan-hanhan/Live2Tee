@@ -11,11 +11,16 @@ namespace live2tee {
 // 扫描 skins 目录下的 *.png(按文件名排序)。
 QStringList ScanSkinFiles(const QString& skins_dir);
 
+// 扫描 scripts 目录下的 *.lua(按文件名排序)。
+QStringList ScanLuaScripts(const QString& scripts_dir);
+
 struct AppConfig {
 	// ---- 持久化字段 ----
 	QString assets_dir;        // 空 = exe 同级 /assets
 	QString skins_dir;         // 空 = <assets_dir>/skins
 	QString skin;              // 皮肤文件名(相对 skins_dir),空 = 自动挑第一个
+	QStringList behavior_scripts; // 行为脚本(相对 ResolvedScriptsDir,顺序=优先级,顶部最高;
+	                              // 空 = 内置默认行为;字段缺失默认 ["behavior.lua"])
 	int output_size = 512;     // 输出边长(离屏帧/预览窗口,正方形)
 	int output_fps = 60;       // 输出帧率
 	bool browser_output = true;  // 浏览器源(本地 WebSocket)输出开关
@@ -36,6 +41,7 @@ struct AppConfig {
 	QString ConfigPath() const;       // config.json 的绝对路径
 	QString ResolvedAssetsDir() const; // 用户可写 assets 目录
 	QString ResolvedSkinsDir() const;
+	QString ResolvedScriptsDir() const; // 行为脚本目录(<assets>/scripts)
 	QString SkinPath() const;         // 当前皮肤完整路径
 
 	// 随程序捆绑的只读 assets 目录(exe 同级或安装前缀 share/live2tee/assets)。

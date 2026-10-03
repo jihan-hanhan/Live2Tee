@@ -240,6 +240,7 @@ float TeeScene::TeeSize() const
 TeeScene::TeeScene(const AppConfig& cfg, InputQueue* queue)
 	: cfg_(cfg)
 	, queue_(queue)
+	, behavior_(std::make_unique<BuiltinBehavior>())
 	, t0_(std::chrono::steady_clock::now())
 {
 }
@@ -265,8 +266,8 @@ void TeeScene::CalibrateMouseOffset()
 	has_custom_origin_ = false; // 回到屏幕中心模式
 	int off_x = 0, off_y = 0;
 	if (QueryMouseOffsetFromScreenCenter(off_x, off_y)) {
-		state_.mouse_off_x = static_cast<float>(off_x);
-		state_.mouse_off_y = static_cast<float>(off_y);
+		state_.SetAimOffset(static_cast<float>(off_x),
+							static_cast<float>(off_y));
 	} else {
 		state_.ResetMouseOffset();
 	}
@@ -278,8 +279,8 @@ void TeeScene::SetMouseOrigin(const QPoint& origin)
 	// 屏幕逻辑坐标,高 DPI 缩放一致,无需手动换算物理像素。
 	// 把虚拟偏移锚定为"光标 - 原点",使 Tee 朝向 = 光标相对 origin 的方位。
 	const QPoint cursor = QCursor::pos();
-	state_.mouse_off_x = static_cast<float>(cursor.x() - origin.x());
-	state_.mouse_off_y = static_cast<float>(cursor.y() - origin.y());
+	state_.SetAimOffset(static_cast<float>(cursor.x() - origin.x()),
+						static_cast<float>(cursor.y() - origin.y()));
 	// 记住原点,供周期重锚定(ReAnchorMouse)沿用同一参考系
 	has_custom_origin_ = true;
 	custom_origin_ = origin;
@@ -296,13 +297,13 @@ void TeeScene::ReAnchorMouse()
 	last_reanchor_cursor_ = cursor;
 
 	if (has_custom_origin_) {
-		state_.mouse_off_x = static_cast<float>(cursor.x() - custom_origin_.x());
-		state_.mouse_off_y = static_cast<float>(cursor.y() - custom_origin_.y());
+		state_.SetAimOffset(static_cast<float>(cursor.x() - custom_origin_.x()),
+							static_cast<float>(cursor.y() - custom_origin_.y()));
 	} else {
 		int off_x = 0, off_y = 0;
 		if (QueryMouseOffsetFromScreenCenter(off_x, off_y)) {
-			state_.mouse_off_x = static_cast<float>(off_x);
-			state_.mouse_off_y = static_cast<float>(off_y);
+			state_.SetAimOffset(static_cast<float>(off_x),
+								static_cast<float>(off_y));
 		}
 	}
 }
@@ -372,12 +373,45 @@ bool TeeScene::ReloadSkinTexture(const QString& skin_path)
 	return true;
 }
 
+void TeeScene::TriggerEmoticon(int id)
+{
+	if (!queue_)
+		return; // 无输入队列的场景无法对齐内部时间基准,忽略
+	InputEvent ev;
+	ev.kind = EInputKind::Emoticon;
+	ev.emoticon_id = id; // <0/越界由 TeeState::ShowEmoticon 随机
+	queue_->Push(ev);
+}
+
+void TeeScene::SetBehavior(std::unique_ptr<IBehavior> behavior)
+{
+	behavior_ = behavior ? std::move(behavior)
+	                     : std::make_unique<BuiltinBehavior>();
+	behavior_ctx_.Reset(); // 新旧映射器不共享按住状态,避免沿用旧状态误判
+}
+
 void TeeScene::PumpInput()
 {
 	const float now = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0_).count();
+
+	// 事件 -> 行为映射器 -> 动作原语。先更新上下文(按住时刻/空闲计时),
+	// 再让映射器决策;映射器可被 SetBehavior 替换为 Lua 等实现。
 	InputEvent ev;
-	while (queue_->Pop(ev))
-		state_.Apply(ev, now);
+	bool mouse_moved = false;
+	if (queue_) {
+		while (queue_->Pop(ev)) {
+			behavior_ctx_.NoteEvent(ev, now);
+			behavior_->OnEvent(state_, behavior_ctx_, ev, now);
+			mouse_moved |= (ev.kind == EInputKind::MouseMove);
+		}
+	}
+	// 自定义原点模式下,"朝向 = 光标 - 原点"是绝对关系;行为映射器对
+	// MouseMove 只做相对累加(add_aim),积分漂移会把原点冲掉。
+	// 移动事件处理后立刻按真实光标重锚定,保证原点持续生效。
+	// (ReAnchorMouse 内部有新鲜度检测,光标查询冻结时自动跳过。)
+	if (mouse_moved && has_custom_origin_)
+		ReAnchorMouse();
+	behavior_->OnTick(state_, behavior_ctx_, now);
 	state_.Tick(now);
 
 	// libinput 指针加速使原始位移积分系统性偏离真实光标(大幅快速移动时
@@ -390,15 +424,7 @@ void TeeScene::PumpInput()
 		ReAnchorMouse();
 	}
 
-	// 偏移控制:鼠标运动增量直接累加,长时间运行数值会增长,
-	// 超界时拉回即可(方向只取决于偏移的相对比例,不影响朝向);
-	// 累积漂移用 GUI 的"修正鼠标位置"按钮重新锚定到真实光标。
-	constexpr float kLimit = 100000.0f;
-	if (state_.mouse_off_x > kLimit || state_.mouse_off_x < -kLimit ||
-		state_.mouse_off_y > kLimit || state_.mouse_off_y < -kLimit) {
-		state_.mouse_off_x = std::clamp(state_.mouse_off_x, -kLimit, kLimit);
-		state_.mouse_off_y = std::clamp(state_.mouse_off_y, -kLimit, kLimit);
-	}
+	// 偏移钳制已收敛到 TeeState::SetAimOffset/AddAimOffset 内部。
 }
 
 void TeeScene::Render(int w, int h)

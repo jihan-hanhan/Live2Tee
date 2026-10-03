@@ -10,6 +10,7 @@
 #include <QWidget>
 
 #include <QPoint>
+#include <QStringList>
 
 #include "../config.h"
 
@@ -55,8 +56,10 @@ private:
 	void CancelSetOrigin();
 
 	AppConfig cfg_;
+	QStringList behavior_scripts_;  // 当前编辑中的脚本列表(顺序=优先级)
 	QLineEdit* assets_edit_;
 	QLineEdit* skins_edit_;
+	QLineEdit* scripts_edit_;   // 已加载脚本展示(只读,逗号分隔)
 	QComboBox* skin_combo_;
 	QDoubleSpinBox* scale_spin_;   // 渲染整体缩放
 	QComboBox* bg_combo_;          // 0 = 透明, 1 = 绿幕(仅预览窗口)

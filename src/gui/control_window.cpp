@@ -33,6 +33,7 @@
 #endif
 
 #include "skin_picker_dialog.h"
+#include "script_picker_dialog.h"
 
 namespace live2tee {
 
@@ -112,6 +113,32 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 	skin_row_lay->addWidget(skin_pick_btn);
 	skin_row_lay->addWidget(skin_combo_, 1);
 
+	// ---- 行为脚本:扫描 assets/scripts 下 *.lua,子窗口管理加载列表与优先级 ----
+	auto* script_pick_btn = new QPushButton(tr("选择脚本..."), this);
+	script_pick_btn->setToolTip(tr("打开脚本选择窗口,管理要加载的 Lua 脚本及优先级"));
+	connect(script_pick_btn, &QPushButton::clicked, this, [this] {
+		// 以编辑框中的当前目录为准(用户可能刚"浏览..."了新目录,尚未点应用)
+		AppConfig tmp = cfg_;
+		tmp.assets_dir = assets_edit_->text().trimmed();
+		tmp.behavior_scripts = behavior_scripts_;
+		ScriptPickerDialog dlg(tmp, this);
+		if (dlg.exec() == QDialog::Accepted) {
+			behavior_scripts_ = dlg.SelectedScripts();
+			scripts_edit_->setText(behavior_scripts_.join(QStringLiteral(", ")));
+			OnApply(); // 子窗口"应用" = 立即保存 config 并热更新脚本
+		}
+	});
+
+	scripts_edit_ = new QLineEdit(this);
+	scripts_edit_->setReadOnly(true);
+	scripts_edit_->setToolTip(tr("已加载的行为脚本(越靠左优先级越高);空 = 内置默认行为"));
+
+	auto* scripts_row = new QWidget(this);
+	auto* scripts_row_lay = new QHBoxLayout(scripts_row);
+	scripts_row_lay->setContentsMargins(0, 0, 0, 0);
+	scripts_row_lay->addWidget(script_pick_btn);
+	scripts_row_lay->addWidget(scripts_edit_, 1);
+
 	scale_spin_ = new QDoubleSpinBox(this);
 	scale_spin_->setRange(0.25, 4.0);
 	scale_spin_->setSingleStep(0.05);
@@ -124,6 +151,7 @@ ControlWindow::ControlWindow(const AppConfig& cfg, QWidget* parent)
 
 	auto* misc_form = new QFormLayout;
 	misc_form->addRow(tr("皮肤:"), skin_row);
+	misc_form->addRow(tr("脚本:"), scripts_row);
 	misc_form->addRow(tr("渲染缩放:"), scale_spin_);
 	misc_form->addRow(tr("背景(仅预览):"), bg_combo_);
 
@@ -259,6 +287,8 @@ void ControlWindow::LoadFromConfig()
 	RefreshSkinList();
 	const int idx = skin_combo_->findText(cfg_.skin);
 	skin_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+	behavior_scripts_ = cfg_.behavior_scripts;
+	scripts_edit_->setText(behavior_scripts_.join(QStringLiteral(", ")));
 	scale_spin_->setValue(cfg_.render_scale);
 	bg_combo_->setCurrentIndex(cfg_.green_screen ? 1 : 0);
 
@@ -294,6 +324,7 @@ void ControlWindow::OnApply()
 		QDir(AppConfig().ResolvedAssetsDir()).absolutePath())
 		new_cfg.assets_dir.clear();
 	new_cfg.skin = skin_combo_->currentText();
+	new_cfg.behavior_scripts = behavior_scripts_;
 	new_cfg.render_scale = static_cast<float>(scale_spin_->value());
 	new_cfg.green_screen = bg_combo_->currentIndex() == 1;
 	new_cfg.browser_output = browser_check_->isChecked();

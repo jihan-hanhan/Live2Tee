@@ -1,63 +1,87 @@
-// Tee 状态机实现:鼠标偏移(偏移控制) + 动作优先级 + 超时回收。
+// Tee 状态机实现:动作原语 + 超时回收 + 朝向/动画查询。
+// "输入事件 -> 原语"的映射策略不在本文件,见 src/state/behavior.*。
 
 #include "state.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <random>
 
 namespace live2tee {
 
-// 动作持续时间(秒)
-static constexpr float HAMMER_DURATION = 0.40f;
-static constexpr float HOOK_DURATION = 0.30f;
-static constexpr float EMOTE_DURATION = 2.00f;
-// 两次表情之间的最小间隔:快速连按/狂按键盘时限频,防止气泡狂闪
-static constexpr float EMOTE_COOLDOWN = 0.30f;
-
 // 距虚拟鼠标小于这个阈值时方向退化,避免抖动
 static constexpr float DIRECTION_DEADZONE = 8.0f;
+// SetAimDirection 归一化后采用的偏移幅度(远离死区、远低于钳制上限)
+static constexpr float AIM_DIRECTION_MAGNITUDE = 1000.0f;
 
-void TeeState::Apply(const InputEvent& ev, float now)
+// ---------------------------------------------------------------------------
+// 动作原语
+// ---------------------------------------------------------------------------
+
+void TeeState::PlayHammer(float now)
 {
-	switch (ev.kind) {
-	case EInputKind::MouseMove:
-		mouse_off_x += static_cast<float>(ev.dx);
-		mouse_off_y += static_cast<float>(ev.dy);
-		break;
-
-	case EInputKind::MouseLeft:
-		if (ev.pressed) {
-			action = EAction::Hammer;
-			action_start_time = now;
-		}
-		break;
-
-	case EInputKind::MouseRight:
-		if (ev.pressed) {
-			action = EAction::Hook;
-			action_start_time = now;
-		}
-		break;
-
-	case EInputKind::Key:
-		if (ev.pressed) {
-			// 任意键触发头顶表情气泡。气泡生命周期独立于动作位,
-			// 与 Hammer/Hook 共存;冷却期内的新按键忽略,限频防止鬼畜
-			static float s_last_emote_time = -1e9f;
-			if (now - s_last_emote_time >= EMOTE_COOLDOWN) {
-				static unsigned int s_emote_counter = 0;
-				emoticon_id = static_cast<int>((++s_emote_counter) % teer::NUM_EMOTICONS);
-				emoticon_start_time = now;
-				s_last_emote_time = now;
-			}
-		}
-		break;
-	}
+	action = EAction::Hammer;
+	action_start_time = now;
 }
+
+void TeeState::PlayHook(float now)
+{
+	action = EAction::Hook;
+	action_start_time = now;
+}
+
+void TeeState::ShowEmoticon(int id, float now)
+{
+	if (id < 0 || id >= teer::NUM_EMOTICONS)
+		id = RandomEmoticonId();
+	emoticon_id = id;
+	emoticon_start_time = now;
+}
+
+void TeeState::ClearEmoticon()
+{
+	emoticon_id = -1;
+}
+
+// ---------------------------------------------------------------------------
+// 朝向原语
+// ---------------------------------------------------------------------------
+
+void TeeState::AddAimOffset(float dx, float dy)
+{
+	SetAimOffset(mouse_off_x + dx, mouse_off_y + dy);
+}
+
+void TeeState::SetAimOffset(float x, float y)
+{
+	mouse_off_x = std::clamp(x, -AIM_OFFSET_LIMIT, AIM_OFFSET_LIMIT);
+	mouse_off_y = std::clamp(y, -AIM_OFFSET_LIMIT, AIM_OFFSET_LIMIT);
+}
+
+void TeeState::SetAimDirection(float dir_x, float dir_y)
+{
+	const float len = std::sqrt(dir_x * dir_x + dir_y * dir_y);
+	if (len < 1e-6f)
+		return;
+	SetAimOffset(dir_x / len * AIM_DIRECTION_MAGNITUDE,
+				 dir_y / len * AIM_DIRECTION_MAGNITUDE);
+}
+
+void TeeState::ResetMouseOffset()
+{
+	mouse_off_x = 0.0f;
+	mouse_off_y = 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// 帧推进 / 查询
+// ---------------------------------------------------------------------------
 
 void TeeState::Tick(float now)
 {
 	// 气泡独立到期,不受动作切换影响
-	if (emoticon_id >= 0 && now - emoticon_start_time >= EMOTE_DURATION)
+	if (emoticon_id >= 0 && now - emoticon_start_time >= EMOTE_DURATION_SEC)
 		emoticon_id = -1;
 
 	if (action == EAction::Idle)
@@ -66,11 +90,11 @@ void TeeState::Tick(float now)
 	const float elapsed = now - action_start_time;
 	switch (action) {
 	case EAction::Hammer:
-		if (elapsed >= HAMMER_DURATION)
+		if (elapsed >= HAMMER_DURATION_SEC)
 			action = EAction::Idle;
 		break;
 	case EAction::Hook:
-		if (elapsed >= HOOK_DURATION)
+		if (elapsed >= HOOK_DURATION_SEC)
 			action = EAction::Idle;
 		break;
 	default: break;
@@ -79,7 +103,7 @@ void TeeState::Tick(float now)
 
 bool TeeState::EmoteActive(float now) const
 {
-	return emoticon_id >= 0 && now - emoticon_start_time < EMOTE_DURATION;
+	return emoticon_id >= 0 && now - emoticon_start_time < EMOTE_DURATION_SEC;
 }
 
 teer::vec2 TeeState::ComputeDirection() const
@@ -90,12 +114,6 @@ teer::vec2 TeeState::ComputeDirection() const
 	return teer::vec2(mouse_off_x / len, mouse_off_y / len);
 }
 
-void TeeState::ResetMouseOffset()
-{
-	mouse_off_x = 0.0f;
-	mouse_off_y = 0.0f;
-}
-
 const teer::CAnimState* TeeState::GetAnimState(float now) const
 {
 	// Hammer 动作:复刻 CAnimState::GetIdle() 的姿态(BASE + IDLE),
@@ -103,7 +121,7 @@ const teer::CAnimState* TeeState::GetAnimState(float now) const
 	// 注意:不能只用 Set(IDLE),会缺 BASE 的 body Y=-4 / foot Y=10,
 	// 导致脚从 Y=10 跑到 Y=0(脚往上跑)。
 	if (action == EAction::Hammer) {
-		const float t = (now - action_start_time) / HAMMER_DURATION;
+		const float t = (now - action_start_time) / HAMMER_DURATION_SEC;
 		static teer::CAnimState hammer_state;
 		hammer_state.Set(&teer::s_aAnimations[teer::ANIM_BASE], 0.0f);
 		hammer_state.Add(&teer::s_aAnimations[teer::ANIM_IDLE], 0.0f, 1.0f);
@@ -145,6 +163,14 @@ teer::EEmote TeeState::GetEmote() const
 	if (emoticon_id >= 0)
 		return EmoticonEyeMapping(emoticon_id);
 	return teer::EMOTE_NORMAL;
+}
+
+int RandomEmoticonId()
+{
+	static thread_local std::mt19937 rng(static_cast<std::mt19937::result_type>(
+		std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::uniform_int_distribution<int> dist(0, teer::NUM_EMOTICONS - 1);
+	return dist(rng);
 }
 
 } // namespace live2tee

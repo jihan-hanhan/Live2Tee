@@ -41,6 +41,9 @@ private slots:
 
 private:
 	void RestartTimer();
+	// 按 cfg_.behavior_scripts 重建行为映射器(空列表/全部失败 = 内置默认);
+	// 启动 Initialize 与每次 ApplyConfig 均调用
+	void ReloadBehaviorScripts();
 
 	AppConfig cfg_;
 	InputQueue* queue_;

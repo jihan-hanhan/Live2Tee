@@ -22,6 +22,51 @@ target_include_directories(tee_render PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tee_render/include
 )
 
+# ---- third-party: Lua 5.4 静态库(行为脚本,沙箱打开) -------------------------
+# 只编译核心库源文件,不含 lua.c/luac.c 独立解释器。
+# 运行时由 LuaBehavior 选择性开库(base/string/table/math/utf8/coroutine),
+# 不加载 os/io/debug/package,脚本无法执行进程或访问文件系统。
+add_library(lua_static STATIC
+  third_party/lua/lapi.c
+  third_party/lua/lauxlib.c
+  third_party/lua/lbaselib.c
+  third_party/lua/lcode.c
+  third_party/lua/lcorolib.c
+  third_party/lua/lctype.c
+  third_party/lua/ldblib.c
+  third_party/lua/ldebug.c
+  third_party/lua/ldo.c
+  third_party/lua/ldump.c
+  third_party/lua/lfunc.c
+  third_party/lua/lgc.c
+  third_party/lua/linit.c
+  third_party/lua/liolib.c
+  third_party/lua/llex.c
+  third_party/lua/lmathlib.c
+  third_party/lua/lmem.c
+  third_party/lua/loadlib.c
+  third_party/lua/lobject.c
+  third_party/lua/lopcodes.c
+  third_party/lua/loslib.c
+  third_party/lua/lparser.c
+  third_party/lua/lstate.c
+  third_party/lua/lstring.c
+  third_party/lua/lstrlib.c
+  third_party/lua/ltable.c
+  third_party/lua/ltablib.c
+  third_party/lua/ltm.c
+  third_party/lua/lundump.c
+  third_party/lua/lutf8lib.c
+  third_party/lua/lvm.c
+  third_party/lua/lzio.c
+)
+target_include_directories(lua_static PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua
+)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(lua_static PRIVATE -w) # 上游代码,不看其告警
+endif()
+
 # ---- 主程序 ----------------------------------------------------------------
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets WebSockets)
 
@@ -31,6 +76,7 @@ add_executable(Live2Tee
   src/gui/preview_window.cpp
   src/gui/control_window.cpp
   src/gui/skin_picker_dialog.cpp
+  src/gui/script_picker_dialog.cpp
   src/render/scene.cpp
   src/render/offscreen_output.cpp
   src/render/gl_backend.cpp
@@ -38,6 +84,8 @@ add_executable(Live2Tee
   src/net/browser_server.cpp
   src/input/input.cpp
   src/state/state.cpp
+  src/state/behavior.cpp
+  src/state/lua_behavior.cpp
 )
 
 target_include_directories(Live2Tee PRIVATE
@@ -47,6 +95,7 @@ target_include_directories(Live2Tee PRIVATE
 
 target_link_libraries(Live2Tee PRIVATE
   tee_render
+  lua_static
   Qt6::Core
   Qt6::Gui
   Qt6::Widgets
@@ -116,6 +165,17 @@ add_custom_command(TARGET Live2Tee POST_BUILD
   COMMENT "Deploy browser source page"
 )
 
+# 行为脚本示例:src/scripts/behavior.example.lua -> assets/scripts/
+# 只部署 .example,用户的 behavior.lua 永远不会被构建覆盖
+add_custom_command(TARGET Live2Tee POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    $<TARGET_FILE_DIR:Live2Tee>/assets/scripts
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scripts/behavior.example.lua
+    $<TARGET_FILE_DIR:Live2Tee>/assets/scripts/behavior.example.lua
+  COMMENT "Deploy behavior script example"
+)
+
 # ---- 一键发布包:dist/ = exe + assets + windeployqt 收集的 Qt6/MinGW 运行库 -> zip ----
 if(WIN32)
   get_target_property(_qmake_exe Qt6::qmake IMPORTED_LOCATION)
@@ -139,8 +199,14 @@ if(WIN32)
     list(APPEND _assets_cmds
       COMMAND ${CMAKE_COMMAND} -E make_directory "${_DIST_DIR}/assets/browser"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/browser/live2tee.html"
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/browser/live2tee.html
         "${_DIST_DIR}/assets/browser/live2tee.html")
+    # 行为脚本示例
+    list(APPEND _assets_cmds
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_DIST_DIR}/assets/scripts"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/scripts/behavior.example.lua
+        "${_DIST_DIR}/assets/scripts/behavior.example.lua")
     # MinGW 运行库(windeployqt 在 MSYS2 环境下可能不复制,显式补齐)
     get_filename_component(_mingw_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(_rt_cmds "")

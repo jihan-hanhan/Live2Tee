@@ -12,6 +12,7 @@
 
 #include "../config.h"
 #include "../input/input.h"
+#include "../state/behavior.h"
 #include "../state/state.h"
 #include "texture.h"
 #include <tee_emoticon.h>
@@ -48,6 +49,17 @@ public:
 	// 鼠标偏移清零(朝向校准,供 GUI"修正鼠标位置"按钮调用)。
 	void ResetMouseOffset() { state_.ResetMouseOffset(); }
 
+	// 触发头顶表情气泡(线程安全,经输入队列在下一帧生效,可任意线程调用)。
+	// id: 0..NUM_EMOTICONS-1 播放指定表情(emoticons.png 4x4 行优先);
+	//     <0 或越界播放随机表情(也可用 RandomEmoticonId() 自行生成后传入)。
+	// 不受按键冷却限制,立即重置气泡 2s 生命周期。
+	void TriggerEmoticon(int id);
+
+	// 替换"输入事件 -> Tee 动作"的行为映射器(如内置默认 -> Lua 脚本)。
+	// 传 nullptr 恢复为 BuiltinBehavior;替换时清空按住状态记忆。
+	void SetBehavior(std::unique_ptr<IBehavior> behavior);
+	IBehavior* Behavior() const { return behavior_.get(); }
+
 	// 校准:把鼠标偏移对齐到当前真实光标的方位
 	// (Tee 朝向 = 光标相对屏幕中心的方位),消除积分累积漂移。
 	// 平台查询失败时退化为清零(默认朝右)。
@@ -71,6 +83,10 @@ private:
 	AppConfig cfg_;
 	InputQueue* queue_;
 	TeeState state_;
+
+	// 行为映射器(默认内置;SetBehavior 可替换为 Lua 等实现)与其上下文记忆
+	std::unique_ptr<IBehavior> behavior_;
+	BehaviorContext behavior_ctx_;
 
 	QOpenGLFunctions_2_1* f_ = nullptr;
 	std::unique_ptr<GLBackend> backend_;

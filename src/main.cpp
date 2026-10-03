@@ -120,6 +120,7 @@ int main(int argc, char* argv[])
 	}
 	QDir().mkpath(assets_dir + QStringLiteral("/skins"));
 	QDir().mkpath(assets_dir + QStringLiteral("/browser"));
+	QDir().mkpath(assets_dir + QStringLiteral("/scripts")); // 用户行为脚本 behavior.lua
 
 	// ---- 全局输入 ----
 	live2tee::InputQueue queue;

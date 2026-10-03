@@ -37,6 +37,7 @@ enum class EInputKind {
 	MouseLeft,
 	MouseRight,
 	Key,
+	Emoticon, // 程序化触发表情气泡:emoticon_id 指定编号,<0 = 随机
 };
 
 struct InputEvent {
@@ -45,6 +46,7 @@ struct InputEvent {
 	int dy = 0;
 	bool pressed = false;  // 鼠标键/键盘键:按下=true, 抬起=false
 	int keycode = 0;      // 键盘事件:平台相关键码(Windows = VK_*)
+	int emoticon_id = -1; // Emoticon 事件:0..NUM_EMOTICONS-1 指定,<0 = 随机
 };
 
 // 线程安全事件队列(多生产者单消费者)。

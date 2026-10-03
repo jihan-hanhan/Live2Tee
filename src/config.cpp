@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -20,6 +21,14 @@ QStringList ScanSkinFiles(const QString& skins_dir)
 	if (!dir.exists())
 		return {};
 	return dir.entryList({QStringLiteral("*.png")}, QDir::Files, QDir::Name);
+}
+
+QStringList ScanLuaScripts(const QString& scripts_dir)
+{
+	QDir dir(scripts_dir);
+	if (!dir.exists())
+		return {};
+	return dir.entryList({QStringLiteral("*.lua")}, QDir::Files, QDir::Name);
 }
 
 QString AppConfig::ConfigPath() const
@@ -76,6 +85,11 @@ QString AppConfig::ResolvedSkinsDir() const
 	return ResolvedAssetsDir() + QStringLiteral("/skins");
 }
 
+QString AppConfig::ResolvedScriptsDir() const
+{
+	return ResolvedAssetsDir() + QStringLiteral("/scripts");
+}
+
 QString AppConfig::SkinPath() const
 {
 	if (skin.isEmpty())
@@ -108,6 +122,18 @@ AppConfig AppConfig::Load()
 	cfg.assets_dir = obj.value(QStringLiteral("assets_dir")).toString();
 	cfg.skins_dir = obj.value(QStringLiteral("skins_dir")).toString();
 	cfg.skin = obj.value(QStringLiteral("skin")).toString();
+	// 行为脚本列表:字段缺失时默认 behavior.lua(向后兼容旧配置);
+	// 显式存空数组 = 用户主动清空,回退内置默认行为
+	if (obj.contains(QStringLiteral("behavior_scripts"))) {
+		const QJsonArray arr = obj.value(QStringLiteral("behavior_scripts")).toArray();
+		for (const QJsonValue& v : arr) {
+			const QString name = v.toString().trimmed();
+			if (!name.isEmpty())
+				cfg.behavior_scripts << name;
+		}
+	} else {
+		cfg.behavior_scripts = {QStringLiteral("behavior.lua")};
+	}
 	cfg.output_size = obj.value(QStringLiteral("output_size")).toInt(cfg.output_size);
 	cfg.output_fps = obj.value(QStringLiteral("output_fps")).toInt(cfg.output_fps);
 	cfg.browser_output = obj.value(QStringLiteral("browser_output")).toBool(cfg.browser_output);
@@ -134,6 +160,7 @@ bool AppConfig::Save() const
 	obj.insert(QStringLiteral("assets_dir"), assets_dir);
 	obj.insert(QStringLiteral("skins_dir"), skins_dir);
 	obj.insert(QStringLiteral("skin"), skin);
+	obj.insert(QStringLiteral("behavior_scripts"), QJsonArray::fromStringList(behavior_scripts));
 	obj.insert(QStringLiteral("output_size"), output_size);
 	obj.insert(QStringLiteral("output_fps"), output_fps);
 	obj.insert(QStringLiteral("browser_output"), browser_output);
