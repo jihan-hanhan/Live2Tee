@@ -397,20 +397,12 @@ void TeeScene::PumpInput()
 	// 事件 -> 行为映射器 -> 动作原语。先更新上下文(按住时刻/空闲计时),
 	// 再让映射器决策;映射器可被 SetBehavior 替换为 Lua 等实现。
 	InputEvent ev;
-	bool mouse_moved = false;
 	if (queue_) {
 		while (queue_->Pop(ev)) {
 			behavior_ctx_.NoteEvent(ev, now);
 			behavior_->OnEvent(state_, behavior_ctx_, ev, now);
-			mouse_moved |= (ev.kind == EInputKind::MouseMove);
 		}
 	}
-	// 自定义原点模式下,"朝向 = 光标 - 原点"是绝对关系;行为映射器对
-	// MouseMove 只做相对累加(add_aim),积分漂移会把原点冲掉。
-	// 移动事件处理后立刻按真实光标重锚定,保证原点持续生效。
-	// (ReAnchorMouse 内部有新鲜度检测,光标查询冻结时自动跳过。)
-	if (mouse_moved && has_custom_origin_)
-		ReAnchorMouse();
 	behavior_->OnTick(state_, behavior_ctx_, now);
 	state_.Tick(now);
 
@@ -418,7 +410,11 @@ void TeeScene::PumpInput()
 	// 光标走得比原始积分远),周期性用真实光标位置重锚定压制漂移。
 	// ReAnchorMouse 内部有新鲜度检测,光标查询冻结时自动跳过。
 	// 是否启用及间隔由配置控制(Linux 默认开启 200ms,Windows 默认关闭)。
+	// 行为映射器自行接管鼠标移动时(如 Lua 脚本定义了 on_mouse_move)
+	// 不做任何重锚定:朝向完全由脚本决定,SetMouseOrigin/CalibrateMouseOffset
+	// 只作为一次性初始基准,避免覆盖脚本的 add_aim(-dx,...) 等自定义偏移。
 	if (cfg_.auto_reanchor &&
+		!behavior_->OwnsMouseMotion() &&
 		now - last_reanchor_time_ >= cfg_.reanchor_interval_ms / 1000.0f) {
 		last_reanchor_time_ = now;
 		ReAnchorMouse();

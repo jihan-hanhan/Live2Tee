@@ -40,6 +40,7 @@ public:
 	void OnEvent(TeeState& state, BehaviorContext& ctx,
 				 const InputEvent& ev, float now) override;
 	void OnTick(TeeState& state, BehaviorContext& ctx, float now) override;
+	bool OwnsMouseMotion() const override; // 脚本定义了 on_mouse_move = true
 
 private:
 	LuaBehavior() = default;

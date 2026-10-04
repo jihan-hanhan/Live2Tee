@@ -531,4 +531,10 @@ void LuaBehavior::OnTick(TeeState& state, BehaviorContext& ctx, float now)
 	Dispatch(CB_TICK, "on_tick", 1);
 }
 
+bool LuaBehavior::OwnsMouseMotion() const
+{
+	// 槽位被占 = 某脚本定义了 on_mouse_move(回调运行报错停用后自动恢复 false)
+	return cb_refs_[CB_MOVE] != LUA_NOREF;
+}
+
 } // namespace live2tee

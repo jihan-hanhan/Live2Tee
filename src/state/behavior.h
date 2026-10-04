@@ -58,6 +58,13 @@ public:
 
 	// 每帧一次(无输入事件也调用):定时器/连招/空闲表演挂这里。
 	virtual void OnTick(TeeState& state, BehaviorContext& ctx, float now) {}
+
+	// 是否自行接管"鼠标移动 -> 朝向偏移"。返回 true 时场景跳过自动重锚定
+	// (含周期 auto_reanchor),朝向完全由映射器决定;SetMouseOrigin /
+	// CalibrateMouseOffset 只作为一次性初始基准。
+	// 内置行为返回 false(允许场景重锚定压制积分漂移);
+	// Lua 脚本定义了 on_mouse_move 时返回 true。
+	virtual bool OwnsMouseMotion() const { return false; }
 };
 
 // 内置默认行为(与历史版本完全一致):
