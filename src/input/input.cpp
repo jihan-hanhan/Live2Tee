@@ -1,12 +1,14 @@
 // 全局输入线程实现。
-// Windows:WH_MOUSE_LL / WH_KEYBOARD_LL + 消息循环;钩子回调需要本线程
-// 拥有消息循环,且 SetWindowsHookEx 必须在该线程内调用。
+// Windows:Raw Input(message-only 窗口 + RIDEV_INPUTSINK)旁路监听鼠标与键盘,
+// 不拦截系统输入分派,对锁定鼠标的游戏(Minecraft 等)零干扰;详见 input.h。
 // X11(LIVE2TEE_INPUT_X11,CMake 检测到 X11/Xi 时定义):
 //   XInput2 raw 事件 + 独立 Display 连接,见本文件 X11 分支说明。
 // 其他平台:no-op 空桩(编译通过、无输入),TODO: Wayland/macOS 后端。
 
 #include "input.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #if !LIVE2TEE_INPUT_WIN32 && defined(__linux__)
@@ -176,17 +178,8 @@ void InputThread::Stop()
 		return;
 	m_running = false;
 
-	if (m_mouse_hook) {
-		UnhookWindowsHookEx(m_mouse_hook);
-		m_mouse_hook = nullptr;
-	}
-	if (m_keyboard_hook) {
-		UnhookWindowsHookEx(m_keyboard_hook);
-		m_keyboard_hook = nullptr;
-	}
-
 	if (m_thread_id) {
-		// 唤醒阻塞在 GetMessage 的线程
+		// 唤醒阻塞在消息循环的线程
 		PostThreadMessageW(m_thread_id, WM_QUIT, 0, 0);
 	}
 	if (m_thread.joinable())
@@ -211,47 +204,44 @@ void InputThread::Run()
 	m_thread_id = GetCurrentThreadId();
 	g_active_thread = this;
 
-	m_mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, &InputThread::LowLevelMouseProc, GetModuleHandleW(nullptr), 0);
-	m_keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, &InputThread::LowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+	// 钳制校正状态复位,并缓存当前系统光标作为首个比较基准
+	m_have_last_cursor = false;
+	m_count_to_px_x = 1.0;
+	m_count_to_px_y = 1.0;
+	m_rem_x = 0.0;
+	m_rem_y = 0.0;
 
-	if (!m_mouse_hook || !m_keyboard_hook) {
-		std::fprintf(stderr, "SetWindowsHookEx failed: %lu\n", GetLastError());
-	}
-
-	// 鼠标运动增量走 Raw Input(message-only 窗口 + RIDEV_INPUTSINK,
-	// 后台也接收)。偏移控制只需要运动增量,不需要屏幕绝对坐标。
+	// 全部输入(鼠标运动增量/按键 + 键盘)走 Raw Input:message-only 窗口 +
+	// RIDEV_INPUTSINK,后台也接收。旁路只读监听,不在系统分派路径上,
+	// 不影响其他程序(锁定鼠标的游戏也不会被拖慢)。
 	m_raw_wnd = CreateRawInputWindow();
 
 	MSG msg;
 	while (m_running) {
-		// PeekMessage 非阻塞,这样可以轮询 m_running 退出
+		// PeekMessage 非阻塞,这样可以轮询 m_running 退出;
+		// 没有钩子了,该循环的延迟只影响 Tee 自身的响应速度,与系统输入无关。
 		if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		} else {
-			Sleep(5); // 空闲让 CPU
+			Sleep(1); // 空闲让 CPU
 		}
 	}
 
 	if (m_raw_wnd) {
-		// 注销 Raw Input 注册并销毁消息窗口
-		RAWINPUTDEVICE rid = {};
-		rid.usUsagePage = 0x01;
-		rid.usUsage = 0x02;
-		rid.dwFlags = RIDEV_REMOVE;
-		rid.hwndTarget = nullptr;
-		RegisterRawInputDevices(&rid, 1, sizeof(rid));
+		// 注销 Raw Input 注册(鼠标+键盘)并销毁消息窗口
+		RAWINPUTDEVICE rids[2] = {};
+		rids[0].usUsagePage = 0x01;
+		rids[0].usUsage = 0x02;
+		rids[1].usUsagePage = 0x01;
+		rids[1].usUsage = 0x06;
+		for (auto& rid : rids) {
+			rid.dwFlags = RIDEV_REMOVE;
+			rid.hwndTarget = nullptr;
+		}
+		RegisterRawInputDevices(rids, 2, sizeof(RAWINPUTDEVICE));
 		DestroyWindow(m_raw_wnd);
 		m_raw_wnd = nullptr;
-	}
-
-	if (m_mouse_hook) {
-		UnhookWindowsHookEx(m_mouse_hook);
-		m_mouse_hook = nullptr;
-	}
-	if (m_keyboard_hook) {
-		UnhookWindowsHookEx(m_keyboard_hook);
-		m_keyboard_hook = nullptr;
 	}
 }
 
@@ -271,12 +261,18 @@ HWND InputThread::CreateRawInputWindow()
 		return nullptr;
 	}
 
-	RAWINPUTDEVICE rid = {};
-	rid.usUsagePage = 0x01;        // generic desktop
-	rid.usUsage = 0x02;            // mouse
-	rid.dwFlags = RIDEV_INPUTSINK; // 程序不在前台也接收
-	rid.hwndTarget = wnd;
-	if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)))
+	RAWINPUTDEVICE rids[2] = {};
+	// 鼠标:运动增量 + 左右键
+	rids[0].usUsagePage = 0x01;        // generic desktop
+	rids[0].usUsage = 0x02;            // mouse
+	rids[0].dwFlags = RIDEV_INPUTSINK; // 程序不在前台也接收
+	rids[0].hwndTarget = wnd;
+	// 键盘:按键按下/抬起(替代原 WH_KEYBOARD_LL,旁路监听不拦截)
+	rids[1].usUsagePage = 0x01;
+	rids[1].usUsage = 0x06;            // keyboard
+	rids[1].dwFlags = RIDEV_INPUTSINK;
+	rids[1].hwndTarget = wnd;
+	if (!RegisterRawInputDevices(rids, 2, sizeof(RAWINPUTDEVICE)))
 		std::fprintf(stderr, "RegisterRawInputDevices failed: %lu\n", GetLastError());
 
 	return wnd;
@@ -294,140 +290,178 @@ LRESULT CALLBACK InputThread::RawInputWndProc(HWND wnd, UINT msg, WPARAM w, LPAR
 		if (GetRawInputData(reinterpret_cast<HRAWINPUT>(l), RID_INPUT,
 							&raw, &size, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1))
 			return 0;
-		if (raw.header.dwType != RIM_TYPEMOUSE)
-			return 0;
 
-		const RAWMOUSE& m = raw.data.mouse;
-		if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
-			// 绝对设备(数位板/远程桌面等):虚拟桌面坐标差分换算成位移。
-			static bool have_last = false;
-			static int last_x = 0, last_y = 0;
-			const int nx = MulDiv(m.lLastX, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1, 65535)
-						   + GetSystemMetrics(SM_XVIRTUALSCREEN);
-			const int ny = MulDiv(m.lLastY, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1, 65535)
-						   + GetSystemMetrics(SM_YVIRTUALSCREEN);
-			int dx = 0, dy = 0;
-			if (have_last) {
-				dx = nx - last_x;
-				dy = ny - last_y;
-			}
-			last_x = nx;
-			last_y = ny;
-			have_last = true;
-			if (dx != 0 || dy != 0) {
+		if (raw.header.dwType == RIM_TYPEMOUSE) {
+			const RAWMOUSE& m = raw.data.mouse;
+
+			// 左右键按下/抬起(一次 WM_INPUT 可携带多个按钮标志)
+			if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) {
 				InputEvent ev;
-				ev.kind = EInputKind::MouseMove;
-				ev.dx = dx;
-				ev.dy = dy;
+				ev.kind = EInputKind::MouseLeft;
+				ev.pressed = true;
 				self->m_queue.Push(ev);
 			}
-		} else {
-			// 相对设备:lLastX/lLastY 就是硬件运动增量,直接入队。
-			if (m.lLastX != 0 || m.lLastY != 0) {
+			if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP) {
 				InputEvent ev;
-				ev.kind = EInputKind::MouseMove;
-				ev.dx = static_cast<int>(m.lLastX);
-				ev.dy = static_cast<int>(m.lLastY);
+				ev.kind = EInputKind::MouseLeft;
+				ev.pressed = false;
 				self->m_queue.Push(ev);
 			}
+			if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN) {
+				InputEvent ev;
+				ev.kind = EInputKind::MouseRight;
+				ev.pressed = true;
+				self->m_queue.Push(ev);
+			}
+			if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) {
+				InputEvent ev;
+				ev.kind = EInputKind::MouseRight;
+				ev.pressed = false;
+				self->m_queue.Push(ev);
+			}
+
+			if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
+				// 绝对设备(数位板/远程桌面等):虚拟桌面坐标差分换算成位移。
+				static bool have_last = false;
+				static int last_x = 0, last_y = 0;
+				const int nx = MulDiv(m.lLastX, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1, 65535)
+							   + GetSystemMetrics(SM_XVIRTUALSCREEN);
+				const int ny = MulDiv(m.lLastY, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1, 65535)
+							   + GetSystemMetrics(SM_YVIRTUALSCREEN);
+				int dx = 0, dy = 0;
+				if (have_last) {
+					dx = nx - last_x;
+					dy = ny - last_y;
+				}
+				last_x = nx;
+				last_y = ny;
+				have_last = true;
+				if (dx != 0 || dy != 0) {
+					InputEvent ev;
+					ev.kind = EInputKind::MouseMove;
+					ev.dx = dx;
+					ev.dy = dy;
+					self->m_queue.Push(ev);
+				}
+			} else {
+				// 相对设备:lLastX/lLastY 是硬件原始计数。光标被屏幕边缘钳住
+				// 或被游戏 SetCursorPos 重置/锁定时,原始增量照常上报但系统
+				// 光标并未(全部)实现这段位移,纯积分会"穿墙"漂到屏幕外很远。
+				// 每个事件后与 GetCursorPos 核对:正常移动信任 raw 全额(保持
+				// 手感与脚本灵敏度语义),位移明显缺失或反向时按实际像素位移
+				// 折算回计数,丢弃被屏幕/游戏吃掉的部分。
+				POINT cur;
+				if (!GetCursorPos(&cur) || !self->m_have_last_cursor) {
+					// 查询失败或首个事件(无比较基准):信任 raw,并建立基准
+					if (GetCursorPos(&self->m_last_cursor))
+						self->m_have_last_cursor = true;
+					InputEvent ev;
+					ev.kind = EInputKind::MouseMove;
+					ev.dx = static_cast<int>(m.lLastX);
+					ev.dy = static_cast<int>(m.lLastY);
+					self->m_queue.Push(ev);
+					return 0;
+				}
+
+				const int dpx_x = cur.x - self->m_last_cursor.x;
+				const int dpx_y = cur.y - self->m_last_cursor.y;
+				double out_x = static_cast<double>(m.lLastX);
+				double out_y = static_cast<double>(m.lLastY);
+
+				// 单轴校正:raw 非零时比较"预期像素位移"(自适应比例)与真实
+				// 像素位移。真实位移不足预期一半,或方向相反,即判定被钳制。
+				if (m.lLastX != 0) {
+					const double expected = self->m_count_to_px_x * m.lLastX;
+					const bool clamped = std::fabs(dpx_x) < std::fabs(expected) * 0.5
+										 || (dpx_x != 0 && (dpx_x > 0) != (m.lLastX > 0));
+					if (clamped) {
+						// 折算实际实现的计数,并 clamp 到与 raw 同号、不超过 raw
+						double realized = dpx_x / self->m_count_to_px_x;
+						const double lo = m.lLastX > 0 ? 0.0 : static_cast<double>(m.lLastX);
+						const double hi = m.lLastX > 0 ? static_cast<double>(m.lLastX) : 0.0;
+						out_x = std::clamp(realized, lo, hi);
+					} else if (dpx_x != 0) {
+						// 正常帧:EWMA 更新 计数->像素 比例(边缘/钳制帧不更新)
+						const double k = std::fabs(static_cast<double>(dpx_x) / m.lLastX);
+						self->m_count_to_px_x = 0.95 * self->m_count_to_px_x + 0.05 * k;
+					}
+				}
+				if (m.lLastY != 0) {
+					const double expected = self->m_count_to_px_y * m.lLastY;
+					const bool clamped = std::fabs(dpx_y) < std::fabs(expected) * 0.5
+										 || (dpx_y != 0 && (dpx_y > 0) != (m.lLastY > 0));
+					if (clamped) {
+						double realized = dpx_y / self->m_count_to_px_y;
+						const double lo = m.lLastY > 0 ? 0.0 : static_cast<double>(m.lLastY);
+						const double hi = m.lLastY > 0 ? static_cast<double>(m.lLastY) : 0.0;
+						out_y = std::clamp(realized, lo, hi);
+					} else if (dpx_y != 0) {
+						const double k = std::fabs(static_cast<double>(dpx_y) / m.lLastY);
+						self->m_count_to_px_y = 0.95 * self->m_count_to_px_y + 0.05 * k;
+					}
+				}
+
+				self->m_last_cursor = cur;
+
+				// 折算结果可能是小数:余量累积,四舍五入取整后入队
+				self->m_rem_x += out_x;
+				self->m_rem_y += out_y;
+				const int dx = static_cast<int>(std::lround(self->m_rem_x));
+				const int dy = static_cast<int>(std::lround(self->m_rem_y));
+				if (dx != 0 || dy != 0) {
+					self->m_rem_x -= dx;
+					self->m_rem_y -= dy;
+					InputEvent ev;
+					ev.kind = EInputKind::MouseMove;
+					ev.dx = dx;
+					ev.dy = dy;
+					self->m_queue.Push(ev);
+				}
+				return 0;
+			}
+			return 0;
+		}
+
+		if (raw.header.dwType == RIM_TYPEKEYBOARD) {
+			const RAWKEYBOARD& k = raw.data.keyboard;
+			// VKey = 0xFF 表示无法映射的键;只放行标准 VK 范围
+			if (k.VKey == 0 || k.VKey >= 0xFF)
+				return 0;
+			const bool pressed = (k.Flags & RI_KEY_BREAK) == 0;
+
+			// 按键按下状态表:过滤系统自动重复(长按)。
+			// 与 DDnet 输入层一致,只有"松开→按下"的沿才算新按键,
+			// 否则长按一次键盘会连发几十个 KeyDown,表情狂闪。
+			static bool key_down[256] = {};
+			const int key_idx = static_cast<int>(k.VKey) & 0xFF;
+
+			if (pressed) {
+				if (key_down[key_idx])
+					return 0; // 自动重复,忽略
+				key_down[key_idx] = true;
+				// GUI 唤起热键在输入层截获,不进表情管线
+				if (self->m_gui_hotkey_vk.load(std::memory_order_relaxed) == static_cast<int>(k.VKey)) {
+					self->m_gui_hotkey_flag.store(true, std::memory_order_relaxed);
+					return 0;
+				}
+				InputEvent ev;
+				ev.kind = EInputKind::Key;
+				ev.pressed = true;
+				ev.keycode = static_cast<int>(k.VKey);
+				self->m_queue.Push(ev);
+			} else {
+				key_down[key_idx] = false;
+				InputEvent ev;
+				ev.kind = EInputKind::Key;
+				ev.pressed = false;
+				ev.keycode = static_cast<int>(k.VKey);
+				self->m_queue.Push(ev);
+			}
+			return 0;
 		}
 		return 0;
 	}
 	return DefWindowProcW(wnd, msg, w, l);
-}
-
-LRESULT CALLBACK InputThread::LowLevelMouseProc(int code, WPARAM w, LPARAM l)
-{
-	if (code != HC_ACTION)
-		return CallNextHookEx(nullptr, code, w, l);
-
-	InputThread* self = g_active_thread;
-	if (!self || !self->m_running)
-		return CallNextHookEx(nullptr, code, w, l);
-
-	switch (w) {
-	// 鼠标移动不在钩子里处理:WH_MOUSE_LL 只有屏幕绝对坐标 m->pt,
-	// 依赖系统坐标系且在屏幕边缘/全屏锁鼠标时会丢位移;
-	// 运动增量由 Raw Input 窗口(RawInputWndProc)提供。
-	case WM_LBUTTONDOWN: {
-		InputEvent ev;
-		ev.kind = EInputKind::MouseLeft;
-		ev.pressed = true;
-		self->m_queue.Push(ev);
-		break;
-	}
-	case WM_LBUTTONUP: {
-		InputEvent ev;
-		ev.kind = EInputKind::MouseLeft;
-		ev.pressed = false;
-		self->m_queue.Push(ev);
-		break;
-	}
-	case WM_RBUTTONDOWN: {
-		InputEvent ev;
-		ev.kind = EInputKind::MouseRight;
-		ev.pressed = true;
-		self->m_queue.Push(ev);
-		break;
-	}
-	case WM_RBUTTONUP: {
-		InputEvent ev;
-		ev.kind = EInputKind::MouseRight;
-		ev.pressed = false;
-		self->m_queue.Push(ev);
-		break;
-	}
-	}
-	return CallNextHookEx(nullptr, code, w, l);
-}
-
-LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int code, WPARAM w, LPARAM l)
-{
-	if (code != HC_ACTION)
-		return CallNextHookEx(nullptr, code, w, l);
-
-	InputThread* self = g_active_thread;
-	if (!self || !self->m_running)
-		return CallNextHookEx(nullptr, code, w, l);
-
-	const KBDLLHOOKSTRUCT* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(l);
-
-	// 按键按下状态表:过滤系统自动重复(长按)。
-	// 与 DDnet 输入层一致,只有"松开→按下"的沿才算新按键,
-	// 否则长按一次键盘会连发几十个 KeyDown,表情狂闪。
-	static bool key_down[256] = {};
-	const int key_idx = static_cast<int>(k->vkCode) & 0xFF;
-
-	switch (w) {
-	case WM_KEYDOWN:
-	case WM_SYSKEYDOWN: {
-		if (key_down[key_idx])
-			break; // 自动重复,忽略
-		key_down[key_idx] = true;
-		// GUI 唤起热键在钩子层截获,不进表情管线
-		if (self->m_gui_hotkey_vk.load(std::memory_order_relaxed) == static_cast<int>(k->vkCode)) {
-			self->m_gui_hotkey_flag.store(true, std::memory_order_relaxed);
-			break;
-		}
-		InputEvent ev;
-		ev.kind = EInputKind::Key;
-		ev.pressed = true;
-		ev.keycode = static_cast<int>(k->vkCode);
-		self->m_queue.Push(ev);
-		break;
-	}
-	case WM_KEYUP:
-	case WM_SYSKEYUP: {
-		key_down[key_idx] = false;
-		InputEvent ev;
-		ev.kind = EInputKind::Key;
-		ev.pressed = false;
-		ev.keycode = static_cast<int>(k->vkCode);
-		self->m_queue.Push(ev);
-		break;
-	}
-	}
-	return CallNextHookEx(nullptr, code, w, l);
 }
 
 #elif defined(__linux__)

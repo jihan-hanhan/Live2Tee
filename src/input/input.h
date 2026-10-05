@@ -1,8 +1,12 @@
 #pragma once
 
 // 全局输入:鼠标移动/左右键 + 键盘按键。
-//   Windows:WH_MOUSE_LL + WH_KEYBOARD_LL 钩子(按键)+ Raw Input 消息窗口
-//   (鼠标运动增量,需要在拥有消息循环的线程里创建,与钩子同线程)。
+//   Windows:Raw Input 消息窗口(message-only + RIDEV_INPUTSINK,后台也接收),
+//   鼠标运动增量/按键与键盘按键全部由 WM_INPUT 旁路拷贝提供。
+//   刻意不用 WH_MOUSE_LL/WH_KEYBOARD_LL 低级钩子:钩子在系统分派路径上被
+//   同步等待,回调线程的任何调度延迟都会拖慢全系统输入 —— 锁定鼠标的游戏
+//   (Minecraft 等,每帧 SetCursorPos 重置光标 + 高频移动)会出现明显卡顿与
+//   位移积压突跳。Raw Input 只读监听,不在分派路径上,对游戏零干扰。
 //   其他平台:目前为空实现(编译通过,无输入),待接入 X11/Wayland/macOS 后端。
 // 偏移控制:只消费鼠标的相对运动增量(dx/dy),不依赖任何平台的
 // 屏幕绝对坐标 —— 屏幕边缘钳制、全屏锁鼠标、多显示器、DPI 虚拟化都不影响。
@@ -71,7 +75,7 @@ public:
 	void Stop();
 
 	// 唤起 GUI 的全局热键(VK 码,0 = 禁用)。
-	// 热键在键盘钩子层截获,不再作为表情按键进入输入队列;
+	// 热键在输入层截获,不再作为表情按键进入输入队列;
 	// 触发时置位标志,主线程用 ConsumeGuiHotkey() 轮询消费。
 	void SetGuiHotkey(int vk);
 	bool ConsumeGuiHotkey();
@@ -80,25 +84,28 @@ private:
 	void Run();
 
 #if LIVE2TEE_INPUT_WIN32
-	static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM w, LPARAM l);
-	static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM w, LPARAM l);
 	static LRESULT CALLBACK RawInputWndProc(HWND wnd, UINT msg, WPARAM w, LPARAM l);
 
-	// 在当前线程创建 message-only 窗口并注册 Raw Input(鼠标),
-	// 返回窗口句柄;WM_INPUT 在该窗口过程里转成 MouseMove 事件入队。
+	// 在当前线程创建 message-only 窗口并注册 Raw Input(鼠标+键盘),
+	// 返回窗口句柄;WM_INPUT 在该窗口过程里转成输入事件入队。
 	HWND CreateRawInputWindow();
 
 	DWORD m_thread_id = 0;
-	HHOOK m_mouse_hook = nullptr;
-	HHOOK m_keyboard_hook = nullptr;
 	HWND m_raw_wnd = nullptr;
+
+	// 相对鼠标增量的屏幕钳制校正状态(见 RawInputWndProc 相对设备分支):
+	// 原始计数 -> 像素的自适应比例,仅正常移动帧更新
+	double m_count_to_px_x = 1.0, m_count_to_px_y = 1.0;
+	bool m_have_last_cursor = false; // m_last_cursor 是否已有初值
+	POINT m_last_cursor{};           // 上一次事件核对时的系统光标(像素)
+	double m_rem_x = 0.0, m_rem_y = 0.0; // 缩放后不足 1 个计数的小数余量
 #endif
 
 	InputQueue& m_queue;
 	std::thread m_thread;
 	std::atomic<bool> m_running{false};
 	std::atomic<int> m_gui_hotkey_vk{0};   // GUI 唤起热键 VK 码
-	std::atomic<bool> m_gui_hotkey_flag{false}; // 热键触发标志(钩子线程置位)
+	std::atomic<bool> m_gui_hotkey_flag{false}; // 热键触发标志(输入线程置位)
 };
 
 } // namespace live2tee
